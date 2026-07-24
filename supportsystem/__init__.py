@@ -4,6 +4,7 @@ from redbot.core.bot import Red
 import datetime
 from datetime import timedelta
 import re
+import asyncio
 
 class SupportSystem(commands.Cog):
     """Ein erweitertes Support-System ähnlich wie bei Galaxy Bot."""
@@ -47,18 +48,18 @@ class SupportSystem(commands.Cog):
         if not nick: return ""
         return re.sub(r"^\[\d+\]\s*", "", nick)
 
-    # NEU: Hilfsfunktion um den Mover aus dem Audit Log auszulesen
     async def get_mover(self, guild, target_member):
         try:
+            await asyncio.sleep(1) # Warte 1 Sekunde, damit Discord das Audit Log schreiben kann
             now = datetime.datetime.now(datetime.timezone.utc)
-            # Prüfe die letzten 5 Audit Log Einträge für "Member Move"
             async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_move):
-                # Wenn der Eintrag in den letzten 10 Sekunden passiert ist
-                if (now - entry.created_at).total_seconds() < 10:
+                if (now - entry.created_at).total_seconds() < 15:
                     if entry.target and entry.target.id == target_member.id:
-                        return entry.user.id
+                        # WICHTIG: Ignoriere den Bot selbst als Mover
+                        if entry.user.id != self.bot.user.id:
+                            return entry.user.id
         except discord.Forbidden:
-            pass # Bot hat keine Audit Log Rechte
+            pass
         except Exception:
             pass
         return None
@@ -68,7 +69,6 @@ class SupportSystem(commands.Cog):
         if member.bot:
             return
 
-        # Ignoriere reine Mute/Deafen Updates
         if before.channel == after.channel:
             return
 
@@ -82,28 +82,23 @@ class SupportSystem(commands.Cog):
 
         is_staff_member = await self.is_staff(member)
 
-        # 1. USER BETRITTT WARTERAUM (Teamler werden ignoriert!)
         if not is_staff_member and after.channel and after.channel.id == waitroom_id:
             await self.handle_waitroom_join(member, guild)
             return
 
-        # 2. USER VERLÄSST WARTERAUM
         elif not is_staff_member and before.channel and before.channel.id == waitroom_id and (not after.channel or after.channel.id != waitroom_id):
             await self.handle_waitroom_leave(member, guild, after.channel)
             return
 
-        # 3. USER WECHSELT CHANNEL (Support verlassen oder in anderen Support gezogen)
         elif before.channel and after.channel and before.channel != after.channel:
             await self.handle_support_leave(member, guild, before.channel)
             await self.handle_support_join(member, guild, after.channel)
             return
             
-        # 4. USER DISCONNECTET VOM SUPPORT
         elif before.channel and not after.channel:
             await self.handle_support_leave(member, guild, before.channel)
             return
 
-        # 5. USER JOINED AKTIVEN SUPPORT CHANNEL
         elif after.channel and not before.channel:
             await self.handle_support_join(member, guild, after.channel)
             return
@@ -207,10 +202,8 @@ class SupportSystem(commands.Cog):
             except: pass
 
         if after_channel and after_channel.id != await self.config.guild(guild).waitroom():
-            # NEU: Finde heraus, WER den User gezogen hat
             claimer_id = await self.get_mover(guild, member)
             
-            # Prüfen, ob der Ziel-Channel schon ein aktiver Support ist
             active_session_id = None
             async with self.config.guild(guild).active_sessions() as sessions:
                 for msg_id, s_data in sessions.items():
@@ -219,14 +212,12 @@ class SupportSystem(commands.Cog):
                         break
             
             if active_session_id:
-                # In bestehenden Support mergen
                 async with self.config.guild(guild).active_sessions() as sessions:
                     if session_id in sessions and active_session_id in sessions:
                         waiting_session = sessions.pop(session_id)
                         sessions[active_session_id]["user_ids"].append(member.id)
                         sessions[active_session_id]["original_nicks"][str(member.id)] = waiting_session["original_nicks"].get(str(member.id), member.name)
                         
-                        # NEU: Wenn der Mover Teamler ist, füge ihn zum aktiven Support hinzu
                         if claimer_id and claimer_id not in sessions[active_session_id]["staff_ids"]:
                             mover = guild.get_member(claimer_id)
                             if mover and await self.is_staff(mover):
@@ -328,6 +319,13 @@ class SupportSystem(commands.Cog):
                     do_update = True
                     update_title = "Support zusammengelegt"
                     update_desc = f"{member.mention} wurde dem Supportfall hinzugefügt."
+            
+            elif member.id not in session["user_ids"] and not is_staff_member:
+                session["user_ids"].append(member.id)
+                session["original_nicks"][str(member.id)] = self.clean_nick(member.nick if member.nick else member.name) or member.name
+                do_update = True
+                update_title = "Support zusammengelegt"
+                update_desc = f"{member.mention} wurde dem Supportfall hinzugefügt."
                 
         if do_update:
             if waiting_session_id:
@@ -340,30 +338,37 @@ class SupportSystem(commands.Cog):
 
     async def start_support(self, guild, session_id, channel, claimer_id):
         claimer_str = "Manuell gezogen"
+        do_update = False
         
+        # FIX: Idempotent gemacht. Wenn der Fall schon aktiv ist, überschreibt er nicht mehr die Startzeit.
         async with self.config.guild(guild).active_sessions() as sessions:
             if session_id not in sessions: return
             session = sessions[session_id]
-            session["status"] = "active"
-            session["channel_id"] = channel.id
-            session["support_start_time"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             
-            # NEU: Prüfen, ob die Claimer ID ein Teamler ist
+            if session["status"] != "active":
+                session["status"] = "active"
+                session["channel_id"] = channel.id
+                session["support_start_time"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                do_update = True
+            else:
+                if session["channel_id"] != channel.id:
+                    session["channel_id"] = channel.id
+                    do_update = True
+                
             if claimer_id and claimer_id not in session["staff_ids"]:
                 mover = guild.get_member(claimer_id)
                 if mover and await self.is_staff(mover):
                     session["staff_ids"].append(claimer_id)
                     claimer_str = f"<@{claimer_id}>"
+                    do_update = True
                 else:
-                    claimer_str = "Manuell gezogen (kein Teamler)"
+                    if session["status"] != "active":
+                        claimer_str = "Manuell gezogen (kein Teamler)"
             elif claimer_id:
                  claimer_str = f"<@{claimer_id}>"
-        
-        await self.update_embed(guild, session_id, "✅ Supportfall übernommen", f"Übernommen durch: {claimer_str}\nIn Channel: {channel.mention}")
-        
-        try:
-            await channel.send(f"📣 Support wurde übernommen von {claimer_str}.", delete_after=15)
-        except: pass
+                 
+        if do_update:
+            await self.update_embed(guild, session_id, "✅ Supportfall übernommen", f"Übernommen durch: {claimer_str}\nIn Channel: {channel.mention}")
 
     async def update_embed(self, guild, session_id, title, description):
         sessions = await self.config.guild(guild).active_sessions()
@@ -374,6 +379,10 @@ class SupportSystem(commands.Cog):
         if not staff_channel: return
         try:
             msg = await staff_channel.fetch_message(int(session_id))
+        except discord.NotFound:
+            async with self.config.guild(guild).active_sessions() as sessions:
+                if session_id in sessions: del sessions[session_id]
+            return
         except:
             return
             
@@ -566,15 +575,14 @@ class SupportSystem(commands.Cog):
         await self.config.guild(ctx.guild).cooldowns.set({})
         await ctx.send("✅ Alle aktiven Support-Sessions und Cooldowns wurden zurückgesetzt.")
         
-        waitroom_id = await self.config.guild(ctx.guild).waitroom()
-        if waitroom_id:
-            waitroom = ctx.guild.get_channel(waitroom_id)
-            if waitroom:
-                for m in waitroom.members:
-                    try:
-                        clean_nick = self.clean_nick(m.nick if m.nick else m.name) or m.name
+        # FIX: Durchsucht JEDEN Voice-Channel nach hängengebliebenen Supportern
+        for vc in ctx.guild.voice_channels:
+            for m in vc.members:
+                try:
+                    if m.nick and m.nick.startswith("[") and "]" in m.nick:
+                        clean_nick = self.clean_nick(m.nick) or m.name
                         await m.edit(mute=False, nick=clean_nick[:32] if clean_nick != m.name else None, reason="Sessions zurückgesetzt")
-                    except: pass
+                except: pass
 
     @commands.command(name="lsupportstats")
     @commands.mod_or_permissions(manage_messages=True)
