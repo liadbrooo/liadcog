@@ -1,14 +1,15 @@
 import discord
-from discord.ext import commands
-from redbot.core import Config, checks
+from redbot.core import commands, Config
+from redbot.core.bot import Red
 import datetime
 
 class SupportSystem(commands.Cog):
     """Ein erweitertes Support-System ähnlich wie bei Galaxy Bot."""
 
-    def __init__(self, bot):
+    def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
+        # EINDEUTIGE ID verwendet, um Konflikt mit anderem Cog zu vermeiden!
+        self.config = Config.get_conf(self, identifier=9876543210, force_registration=True)
         
         default_guild = {
             "waitroom": None,
@@ -303,58 +304,58 @@ class SupportSystem(commands.Cog):
                 strings.append(f"{period_value}{period_name}")
         return " ".join(strings) if strings else "0s"
 
-    @commands.group()
-    @checks.admin_or_permissions(manage_guild=True)
-    async def supportsetup(self, ctx):
+    @commands.group(name="supportsetup")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def supportsetup(self, ctx: commands.Context):
         """Einstellungen für das Support-System."""
         pass
 
-    @supportsetup.command()
-    async def waitroom(self, ctx, channel: discord.VoiceChannel):
+    @supportsetup.command(name="waitroom")
+    async def waitroom(self, ctx: commands.Context, channel: discord.VoiceChannel):
         """Setzt den Warteraum."""
-        await self.config.guild(ctx.guild).waitroom().set(channel.id)
+        await self.config.guild(ctx.guild).waitroom.set(channel.id)
         await ctx.send(f"✅ Warteraum wurde auf {channel.mention} gesetzt.")
 
-    @supportsetup.command()
-    async def staffchannel(self, ctx, channel: discord.TextChannel):
+    @supportsetup.command(name="staffchannel")
+    async def staffchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Setzt den Channel, in dem die Teamler gepingt werden."""
-        await self.config.guild(ctx.guild).staff_channel().set(channel.id)
+        await self.config.guild(ctx.guild).staff_channel.set(channel.id)
         await ctx.send(f"✅ Staff-Channel wurde auf {channel.mention} gesetzt.")
 
-    @supportsetup.command()
-    async def staffrole(self, ctx, role: discord.Role):
+    @supportsetup.command(name="staffrole")
+    async def staffrole(self, ctx: commands.Context, role: discord.Role):
         """Setzt die Rolle, die gepingt wird und Support übernehmen darf."""
-        await self.config.guild(ctx.guild).staff_role().set(role.id)
+        await self.config.guild(ctx.guild).staff_role.set(role.id)
         await ctx.send(f"✅ Staff-Rolle wurde auf {role.mention} gesetzt.")
 
-    @supportsetup.command()
-    async def logchannel(self, ctx, channel: discord.TextChannel):
+    @supportsetup.command(name="logchannel")
+    async def logchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Setzt einen Log-Channel für beendete Supports."""
-        await self.config.guild(ctx.guild).log_channel().set(channel.id)
+        await self.config.guild(ctx.guild).log_channel.set(channel.id)
         await ctx.send(f"✅ Log-Channel wurde auf {channel.mention} gesetzt.")
 
-    @supportsetup.command()
-    async def cooldown(self, ctx, seconds: int):
+    @supportsetup.command(name="cooldown")
+    async def cooldown(self, ctx: commands.Context, seconds: int):
         """Setzt den Cooldown für User nach einem Support (in Sekunden)."""
-        await self.config.guild(ctx.guild).cooldown().set(seconds)
+        await self.config.guild(ctx.guild).cooldown.set(seconds)
         await ctx.send(f"✅ Cooldown auf {seconds} Sekunden gesetzt.")
 
-    @supportsetup.command()
-    async def blacklist(self, ctx, user: discord.Member, action: str = None):
+    @supportsetup.command(name="blacklist")
+    async def blacklist(self, ctx: commands.Context, user_id: int, action: str = "add"):
         """Fügt einen User zur Blacklist hinzu oder entfernt ihn (add/remove)."""
         bl = await self.config.guild(ctx.guild).blacklist()
         if action == "remove":
-            if user.id in bl: bl.remove(user.id)
-            await self.config.guild(ctx.guild).blacklist().set(bl)
-            await ctx.send(f"✅ {user.mention} wurde von der Blacklist entfernt.")
+            if user_id in bl: bl.remove(user_id)
+            await self.config.guild(ctx.guild).blacklist.set(bl)
+            await ctx.send(f"✅ Nutzer `{user_id}` wurde von der Blacklist entfernt.")
         else:
-            if user.id not in bl: bl.append(user.id)
-            await self.config.guild(ctx.guild).blacklist().set(bl)
-            await ctx.send(f"✅ {user.mention} wurde zur Blacklist hinzugefügt.")
+            if user_id not in bl: bl.append(user_id)
+            await self.config.guild(ctx.guild).blacklist.set(bl)
+            await ctx.send(f"✅ Nutzer `{user_id}` wurde zur Blacklist hinzugefügt.")
 
-    @commands.command()
-    @checks.mod_or_permissions(manage_messages=True)
-    async def supportstats(self, ctx):
+    @commands.command(name="supportstats")
+    @commands.mod_or_permissions(manage_messages=True)
+    async def supportstats(self, ctx: commands.Context):
         """Zeigt Support-Statistiken der Teamler an."""
         stats = await self.config.guild(ctx.guild).stats()
         if not stats:
@@ -375,7 +376,7 @@ class SupportSystem(commands.Cog):
 
 
 class SupportClaimView(discord.ui.View):
-    def __init__(self, cog):
+    def __init__(self, cog: SupportSystem):
         super().__init__(timeout=None)
         self.cog = cog
 
@@ -413,7 +414,7 @@ class SupportClaimView(discord.ui.View):
 
 
 class SupportCloseView(discord.ui.View):
-    def __init__(self, cog):
+    def __init__(self, cog: SupportSystem):
         super().__init__(timeout=None)
         self.cog = cog
 
@@ -434,5 +435,6 @@ class SupportCloseView(discord.ui.View):
         await self.cog.end_session(guild, session_id, "Von Teamler beendet")
         await interaction.response.send_message("Support wurde beendet.", ephemeral=True)
 
-async def setup(bot):
+
+async def setup(bot: Red):
     await bot.add_cog(SupportSystem(bot))
