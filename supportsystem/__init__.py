@@ -95,7 +95,9 @@ class SupportSystem(commands.Cog):
             embed.set_footer(text="Supportfall eröffnet")
 
             view = SupportClaimView(self)
-            msg = await staff_channel.send(content=ping_content, embed=embed, view=view)
+            # FIX: AllowedMentions hinzugefügt, damit der Bot die Rolle wirklich pingt!
+            allowed_mentions = discord.AllowedMentions(roles=True, everyone=True)
+            msg = await staff_channel.send(content=ping_content, embed=embed, view=view, allowed_mentions=allowed_mentions)
 
             sessions[str(msg.id)] = {
                 "user_ids": [member.id],
@@ -370,6 +372,52 @@ class SupportSystem(commands.Cog):
             text += f"**{name}**: {data['count']} Fälle ({dur} gesamt)\n"
             
         embed.description = text
+        await ctx.send(embed=embed)
+
+    @commands.command(name="lsupportinfo")
+    @commands.mod_or_permissions(manage_messages=True)
+    async def lsupportinfo(self, ctx: commands.Context):
+        """Zeigt eine Live-Übersicht aller wartenden und aktiven Supportfälle."""
+        sessions = await self.config.guild(ctx.guild).active_sessions()
+        
+        waiting_users = []
+        active_supports = []
+        
+        for msg_id, s_data in sessions.items():
+            if s_data.get("status") == "waiting":
+                start_time = datetime.datetime.fromisoformat(s_data["start_time"])
+                wait_duration = self.format_timedelta(datetime.datetime.now(datetime.timezone.utc) - start_time)
+                users = ", ".join([f"<@{u}>" for u in s_data.get("user_ids", [])])
+                waiting_users.append(f"👤 {users} (wartet: {wait_duration})")
+                
+            elif s_data.get("status") == "active":
+                users = ", ".join([f"<@{u}>" for u in s_data.get("user_ids", [])])
+                staff = ", ".join([f"<@{s}>" for s in s_data.get("staff_ids", [])]) if s_data.get("staff_ids") else "Unbekannt"
+                channel = ctx.guild.get_channel(s_data.get("channel_id", 0))
+                chan_name = channel.mention if channel else "Unbekannt"
+                active_supports.append(f"🎧 {staff} ➔ {users} ({chan_name})")
+        
+        embed = discord.Embed(title="📋 Support Live-Übersicht", color=discord.Color.blue(), timestamp=datetime.datetime.now(datetime.timezone.utc))
+        
+        if waiting_users:
+            if len(waiting_users) > 15:
+                waiting_text = "\n".join(waiting_users[:15]) + f"\n... und {len(waiting_users) - 15} weitere."
+            else:
+                waiting_text = "\n".join(waiting_users)
+            embed.add_field(name=f"⏳ Im Warteraum ({len(waiting_users)})", value=waiting_text, inline=False)
+        else:
+            embed.add_field(name="⏳ Im Warteraum", value="Der Warteraum ist aktuell leer. 🎉", inline=False)
+            
+        if active_supports:
+            if len(active_supports) > 15:
+                active_text = "\n".join(active_supports[:15]) + f"\n... und {len(active_supports) - 15} weitere."
+            else:
+                active_text = "\n".join(active_supports)
+            embed.add_field(name=f"🎤 Aktiver Support ({len(active_supports)})", value=active_text, inline=False)
+        else:
+            embed.add_field(name="🎤 Aktiver Support", value="Es finden aktuell keine Supports statt. 🌙", inline=False)
+            
+        embed.set_footer(text="Live-Status")
         await ctx.send(embed=embed)
 
 
