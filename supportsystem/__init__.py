@@ -2,8 +2,6 @@ import discord
 from discord.ext import commands
 from redbot.core import Config, checks
 import datetime
-import asyncio
-import re
 
 class SupportSystem(commands.Cog):
     """Ein erweitertes Support-System ähnlich wie bei Galaxy Bot."""
@@ -203,7 +201,7 @@ class SupportSystem(commands.Cog):
                             await self.update_embed(guild, msg_id, "Support zusammengelegt", f"{member.mention} wurde dem Supportfall hinzugefügt.")
                             break
 
-    async def start_support(self, guild, session_id, channel,claimer_id, user):
+    async def start_support(self, guild, session_id, channel, claimer_id, user):
         sessions = await self.config.guild(guild).active_sessions()
         session = sessions[session_id]
         session["status"] = "active"
@@ -315,10 +313,6 @@ class SupportSystem(commands.Cog):
             log_c = guild.get_channel(log_c_id)
             if log_c:
                 await log_c.send(embed=embed)
-
-        # Aus Config löschen nach 24h (oder sofort, hier wir es für Stats/Cooldown kurz behalten)
-        # Fürs erste lassen wir es in der Config, der Cooldown greift darauf zu.
-        # Um die Config nicht vollzumüllen, könnten wir hier aufräumen, aber für Cooldown brauchen wir es.
 
     def format_timedelta(self, delta):
         seconds = int(delta.total_seconds())
@@ -464,3 +458,7 @@ class SupportCloseView(discord.ui.View):
 
         await self.cog.end_session(guild, self.session_id, "Von Teamler beendet")
         await interaction.response.send_message("Support wurde beendet.", ephemeral=True)
+
+# WICHTIG: Diese Setup-Funktion am Ende der Datei wird von RedBot zwingend benötigt!
+async def setup(bot):
+    await bot.add_cog(SupportSystem(bot))
