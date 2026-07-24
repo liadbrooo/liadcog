@@ -14,7 +14,7 @@ class SupportSystem(commands.Cog):
             "waitroom": None,
             "staff_channel": None,
             "staff_role": None,
-            "extra_staff_roles": [], # NEU: Zusatz-Rollen, die übernehmen dürfen, aber nicht gepingt werden
+            "extra_staff_roles": [],
             "log_channel": None,
             "blacklist": [],
             "cooldown": 300,
@@ -27,7 +27,6 @@ class SupportSystem(commands.Cog):
         self.bot.add_view(SupportClaimView(self))
         self.bot.add_view(SupportCloseView(self))
 
-    # NEU: Hilfsfunktion um zu prüfen, ob jemand Supporter ist (Haupt- oder Zusatz-Rolle)
     async def is_staff(self, member: discord.Member):
         guild = member.guild
         staff_role_id = await self.config.guild(guild).staff_role()
@@ -56,8 +55,14 @@ class SupportSystem(commands.Cog):
 
         sessions = await self.config.guild(guild).active_sessions()
 
-        # 1. USER BETRITTT WARTERAUM
-        if after.channel and after.channel.id == waitroom_id:
+        # 1. USER BETRITTT WARTERAUM (WIRKLICH NEU GEMOVED, NICHT NUR GEMUTET)
+        if after.channel and after.channel.id == waitroom_id and (before.channel is None or before.channel.id != waitroom_id):
+            
+            # Sicherheitscheck: Ist der User schon in einer wartenden Session?
+            for s_data in sessions.values():
+                if member.id in s_data.get("user_ids", []) and s_data.get("status") == "waiting":
+                    return # User wartet bereits, keinen Ping senden!
+
             blacklist = await self.config.guild(guild).blacklist()
             if member.id in blacklist:
                 try:
@@ -83,7 +88,6 @@ class SupportSystem(commands.Cog):
             new_nick = f"[{position}] {original_nick}"[:32]
             
             try:
-                # User wird servergemutet und Nickname geändert
                 await member.edit(nick=new_nick, mute=True, reason="Support Warteraum")
             except discord.Forbidden:
                 pass
@@ -92,7 +96,6 @@ class SupportSystem(commands.Cog):
             staff_channel = guild.get_channel(staff_channel_id)
             if not staff_channel: return
 
-            # Nur die HAUPT-Rolle wird gepingt!
             staff_role_id = await self.config.guild(guild).staff_role()
             staff_role = guild.get_role(staff_role_id) if staff_role_id else None
             ping_content = staff_role.mention if staff_role else "@here"
@@ -127,7 +130,7 @@ class SupportSystem(commands.Cog):
             await self.config.guild(guild).active_sessions.set(sessions)
 
         # 2. USER VERLÄSST WARTERAUM
-        elif before.channel and before.channel.id == waitroom_id:
+        elif before.channel and before.channel.id == waitroom_id and (after.channel is None or after.channel.id != waitroom_id):
             session_id = None
             for msg_id, s_data in sessions.items():
                 if member.id in s_data["user_ids"] and s_data["status"] == "waiting":
@@ -139,7 +142,6 @@ class SupportSystem(commands.Cog):
 
             orig_nick = session["original_nicks"].get(str(member.id), member.name)
             try:
-                # User wird entmutet und Nickname zurückgesetzt
                 await member.edit(nick=orig_nick, mute=False, reason="Warteraum verlassen")
             except: pass
 
@@ -153,7 +155,6 @@ class SupportSystem(commands.Cog):
             for msg_id, s_data in list(sessions.items()):
                 if s_data["status"] == "active" and before.channel.id == s_data["channel_id"]:
                     if member.id in s_data["user_ids"]:
-                        # Zur Sicherheit entmutieren, falls er direkt aus dem Support disconnected
                         try: await member.edit(mute=False, reason="Support verlassen")
                         except: pass
 
@@ -175,7 +176,6 @@ class SupportSystem(commands.Cog):
         elif after.channel and before.channel != after.channel:
             for msg_id, s_data in list(sessions.items()):
                 if s_data["status"] == "active" and after.channel.id == s_data["channel_id"]:
-                    # NEU: is_staff prüft Haupt- und Zusatz-Rollen
                     if await self.is_staff(member) and member.id not in s_data["staff_ids"]:
                         s_data["staff_ids"].append(member.id)
                         sessions[msg_id] = s_data
@@ -186,7 +186,6 @@ class SupportSystem(commands.Cog):
                         if s_data2["status"] == "waiting" and member.id in s_data2["user_ids"]:
                             orig_nick = s_data2["original_nicks"].get(str(member.id), member.name)
                             try: 
-                                # Wird in den Support gezogen -> Entmuten
                                 await member.edit(nick=orig_nick, mute=False, reason="Support zusammengelegt")
                             except: pass
                             
@@ -288,7 +287,6 @@ class SupportSystem(commands.Cog):
         if channel:
             for m in channel.members:
                 try: 
-                    # Vor dem Kick aus dem Channel entmutieren
                     await m.edit(mute=False, reason="Support beendet")
                     await m.move_to(None, reason="Support beendet")
                 except: pass
@@ -398,6 +396,21 @@ class SupportSystem(commands.Cog):
             await self.config.guild(ctx.guild).blacklist.set(bl)
             await ctx.send(f"✅ Nutzer `{user_id}` wurde zur Blacklist hinzugefügt.")
 
+    @lsupportsetup.command(name="lclearsessions")
+    async def lclearsessions(self, ctx: commands.Context):
+        """NOTFALL: Setzt alle aktiven Support-Sessions zurück und löscht die Warteschlange."""
+        await self.config.guild(ctx.guild).active_sessions.set({})
+        await ctx.send("✅ Alle aktiven Support-Sessions wurden zurückgesetzt. Die Warteschlange ist leer.")
+        
+        # Versuchen, verbliebene Server-Mutes aufzuheben
+        waitroom_id = await self.config.guild(ctx.guild).waitroom()
+        if waitroom_id:
+            waitroom = ctx.guild.get_channel(waitroom_id)
+            if waitroom:
+                for m in waitroom.members:
+                    try: await m.edit(mute=False, reason="Sessions zurückgesetzt")
+                    except: pass
+
     @commands.command(name="lsupportstats")
     @commands.mod_or_permissions(manage_messages=True)
     async def lsupportstats(self, ctx: commands.Context):
@@ -482,7 +495,6 @@ class SupportClaimView(discord.ui.View):
 
         session = sessions[session_id]
         
-        # NEU: Prüft Haupt- ODER Zusatz-Rollen
         if not await self.cog.is_staff(interaction.user):
             return await interaction.response.send_message("Du bist nicht berechtigt, Support zu übernehmen.", ephemeral=True)
 
@@ -497,7 +509,6 @@ class SupportClaimView(discord.ui.View):
                 member = guild.get_member(u_id)
                 if member and member.voice:
                     await member.move_to(interaction.user.voice.channel, reason="Support übernommen")
-                    # User entmutieren beim Übernehmen
                     await member.edit(mute=False, reason="Support übernommen")
         except discord.Forbidden:
             return await interaction.response.send_message("Ich habe keine Berechtigung, den Nutzer zu verschieben/entmutieren.", ephemeral=True)
@@ -521,7 +532,6 @@ class SupportCloseView(discord.ui.View):
             return await interaction.response.send_message("Session nicht gefunden.", ephemeral=True)
             
         session = sessions[session_id]
-        # NEU: Prüft Haupt- ODER Zusatz-Rollen
         if not await self.cog.is_staff(interaction.user):
              return await interaction.response.send_message("Du bist nicht berechtigt, den Support zu beenden.", ephemeral=True)
 
