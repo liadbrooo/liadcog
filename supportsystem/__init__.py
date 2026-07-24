@@ -21,7 +21,7 @@ class SupportSystem(commands.Cog):
             "blacklist": [],
             "cooldown": 300,
             "active_sessions": {},
-            "cooldowns": {}, # NEU: Saubere Trennung der Cooldowns
+            "cooldowns": {},
             "stats": {}
         }
         self.config.register_guild(**default_guild)
@@ -44,9 +44,24 @@ class SupportSystem(commands.Cog):
         return False
 
     def clean_nick(self, nick: str) -> str:
-        """Entfernt vorhandene [X] Wartenummern vom Nickname."""
         if not nick: return ""
         return re.sub(r"^\[\d+\]\s*", "", nick)
+
+    # NEU: Hilfsfunktion um den Mover aus dem Audit Log auszulesen
+    async def get_mover(self, guild, target_member):
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            # Prüfe die letzten 5 Audit Log Einträge für "Member Move"
+            async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_move):
+                # Wenn der Eintrag in den letzten 10 Sekunden passiert ist
+                if (now - entry.created_at).total_seconds() < 10:
+                    if entry.target and entry.target.id == target_member.id:
+                        return entry.user.id
+        except discord.Forbidden:
+            pass # Bot hat keine Audit Log Rechte
+        except Exception:
+            pass
+        return None
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -65,26 +80,33 @@ class SupportSystem(commands.Cog):
         if not waitroom_id:
             return
 
-        # 1. USER BETRITTT WARTERAUM
-        if after.channel and after.channel.id == waitroom_id:
+        is_staff_member = await self.is_staff(member)
+
+        # 1. USER BETRITTT WARTERAUM (Teamler werden ignoriert!)
+        if not is_staff_member and after.channel and after.channel.id == waitroom_id:
             await self.handle_waitroom_join(member, guild)
+            return
 
         # 2. USER VERLÄSST WARTERAUM
-        elif before.channel and before.channel.id == waitroom_id and (not after.channel or after.channel.id != waitroom_id):
+        elif not is_staff_member and before.channel and before.channel.id == waitroom_id and (not after.channel or after.channel.id != waitroom_id):
             await self.handle_waitroom_leave(member, guild, after.channel)
+            return
 
         # 3. USER WECHSELT CHANNEL (Support verlassen oder in anderen Support gezogen)
         elif before.channel and after.channel and before.channel != after.channel:
             await self.handle_support_leave(member, guild, before.channel)
             await self.handle_support_join(member, guild, after.channel)
+            return
             
         # 4. USER DISCONNECTET VOM SUPPORT
         elif before.channel and not after.channel:
             await self.handle_support_leave(member, guild, before.channel)
+            return
 
         # 5. USER JOINED AKTIVEN SUPPORT CHANNEL
         elif after.channel and not before.channel:
             await self.handle_support_join(member, guild, after.channel)
+            return
 
     async def handle_waitroom_join(self, member, guild):
         async with self.config.guild(guild).active_sessions() as sessions:
@@ -100,7 +122,6 @@ class SupportSystem(commands.Cog):
             except: pass
             return
 
-        # Cooldown Check (NEU: Sauber aus dem cooldowns dict)
         async with self.config.guild(guild).cooldowns() as cooldowns:
             if str(member.id) in cooldowns:
                 end_time_str = cooldowns[str(member.id)]
@@ -115,7 +136,6 @@ class SupportSystem(commands.Cog):
                 else:
                     del cooldowns[str(member.id)]
 
-        # Nickname und Mute setzen
         async with self.config.guild(guild).active_sessions() as sessions:
             position = sum(1 for s in sessions.values() if s.get("status") == "waiting")
             
@@ -175,7 +195,6 @@ class SupportSystem(commands.Cog):
                     break
             
             if not session_id:
-                # Fallback: Nickname aufräumen, falls Session nicht gefunden wurde
                 try:
                     clean_name = self.clean_nick(member.nick if member.nick else member.name) or member.name
                     await member.edit(nick=clean_name[:32], mute=False, reason="Warteraum verlassen (Cleanup)")
@@ -188,7 +207,41 @@ class SupportSystem(commands.Cog):
             except: pass
 
         if after_channel and after_channel.id != await self.config.guild(guild).waitroom():
-            await self.start_support(guild, session_id, after_channel, None)
+            # NEU: Finde heraus, WER den User gezogen hat
+            claimer_id = await self.get_mover(guild, member)
+            
+            # Prüfen, ob der Ziel-Channel schon ein aktiver Support ist
+            active_session_id = None
+            async with self.config.guild(guild).active_sessions() as sessions:
+                for msg_id, s_data in sessions.items():
+                    if s_data.get("status") == "active" and s_data.get("channel_id") == after_channel.id:
+                        active_session_id = msg_id
+                        break
+            
+            if active_session_id:
+                # In bestehenden Support mergen
+                async with self.config.guild(guild).active_sessions() as sessions:
+                    if session_id in sessions and active_session_id in sessions:
+                        waiting_session = sessions.pop(session_id)
+                        sessions[active_session_id]["user_ids"].append(member.id)
+                        sessions[active_session_id]["original_nicks"][str(member.id)] = waiting_session["original_nicks"].get(str(member.id), member.name)
+                        
+                        # NEU: Wenn der Mover Teamler ist, füge ihn zum aktiven Support hinzu
+                        if claimer_id and claimer_id not in sessions[active_session_id]["staff_ids"]:
+                            mover = guild.get_member(claimer_id)
+                            if mover and await self.is_staff(mover):
+                                sessions[active_session_id]["staff_ids"].append(claimer_id)
+                
+                try:
+                    staff_c_id = await self.config.guild(guild).staff_channel()
+                    old_msg = await guild.get_channel(staff_c_id).fetch_message(int(session_id))
+                    await old_msg.delete()
+                except: pass
+                
+                mover_str = f" Gezogen von: <@{claimer_id}>" if claimer_id else ""
+                await self.update_embed(guild, active_session_id, "Support zusammengelegt", f"{member.mention} wurde dem Supportfall hinzugefügt.{mover_str}")
+            else:
+                await self.start_support(guild, session_id, after_channel, claimer_id)
         else:
             await self.end_session(guild, session_id, "Warteraum verlassen (ohne Support)")
 
@@ -286,6 +339,8 @@ class SupportSystem(commands.Cog):
             await self.update_embed(guild, active_session_id, update_title, update_desc)
 
     async def start_support(self, guild, session_id, channel, claimer_id):
+        claimer_str = "Manuell gezogen"
+        
         async with self.config.guild(guild).active_sessions() as sessions:
             if session_id not in sessions: return
             session = sessions[session_id]
@@ -293,10 +348,17 @@ class SupportSystem(commands.Cog):
             session["channel_id"] = channel.id
             session["support_start_time"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             
+            # NEU: Prüfen, ob die Claimer ID ein Teamler ist
             if claimer_id and claimer_id not in session["staff_ids"]:
-                session["staff_ids"].append(claimer_id)
+                mover = guild.get_member(claimer_id)
+                if mover and await self.is_staff(mover):
+                    session["staff_ids"].append(claimer_id)
+                    claimer_str = f"<@{claimer_id}>"
+                else:
+                    claimer_str = "Manuell gezogen (kein Teamler)"
+            elif claimer_id:
+                 claimer_str = f"<@{claimer_id}>"
         
-        claimer_str = f"<@{claimer_id}>" if claimer_id else "Manuell gezogen"
         await self.update_embed(guild, session_id, "✅ Supportfall übernommen", f"Übernommen durch: {claimer_str}\nIn Channel: {channel.mention}")
         
         try:
@@ -348,7 +410,6 @@ class SupportSystem(commands.Cog):
         channel_id = None
         end_time = datetime.datetime.now(datetime.timezone.utc)
         
-        # NEU: Cooldowns sauber speichern und Session löschen
         async with self.config.guild(guild).active_sessions() as sessions:
             if session_id not in sessions: return
             session = sessions[session_id]
@@ -379,10 +440,8 @@ class SupportSystem(commands.Cog):
                         stats[str(s_id)]["count"] += 1
                         stats[str(s_id)]["duration"] += duration
             
-            # Session endgültig aus active_sessions entfernen (verhindert Config-Müll)
             del sessions[session_id]
         
-        # NUR DIE SUPPORTER USER RAUSWERFEN (Teamler bleiben!)
         if channel_id:
             channel = guild.get_channel(channel_id)
             if channel:
@@ -504,7 +563,7 @@ class SupportSystem(commands.Cog):
     async def lclearsessions(self, ctx: commands.Context):
         """NOTFALL: Setzt alle aktiven Support-Sessions zurück und löscht die Warteschlange."""
         await self.config.guild(ctx.guild).active_sessions.set({})
-        await self.config.guild(ctx.guild).cooldowns.set({}) # Auch Cooldowns resetten
+        await self.config.guild(ctx.guild).cooldowns.set({})
         await ctx.send("✅ Alle aktiven Support-Sessions und Cooldowns wurden zurückgesetzt.")
         
         waitroom_id = await self.config.guild(ctx.guild).waitroom()
