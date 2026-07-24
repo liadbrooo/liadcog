@@ -14,6 +14,7 @@ class SupportSystem(commands.Cog):
             "waitroom": None,
             "staff_channel": None,
             "staff_role": None,
+            "extra_staff_roles": [], # NEU: Zusatz-Rollen, die übernehmen dürfen, aber nicht gepingt werden
             "log_channel": None,
             "blacklist": [],
             "cooldown": 300,
@@ -25,6 +26,20 @@ class SupportSystem(commands.Cog):
     async def cog_load(self):
         self.bot.add_view(SupportClaimView(self))
         self.bot.add_view(SupportCloseView(self))
+
+    # NEU: Hilfsfunktion um zu prüfen, ob jemand Supporter ist (Haupt- oder Zusatz-Rolle)
+    async def is_staff(self, member: discord.Member):
+        guild = member.guild
+        staff_role_id = await self.config.guild(guild).staff_role()
+        extra_roles = await self.config.guild(guild).extra_staff_roles()
+        
+        role_ids = [r.id for r in member.roles]
+        if staff_role_id and staff_role_id in role_ids:
+            return True
+        for r_id in extra_roles:
+            if r_id in role_ids:
+                return True
+        return False
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -68,7 +83,8 @@ class SupportSystem(commands.Cog):
             new_nick = f"[{position}] {original_nick}"[:32]
             
             try:
-                await member.edit(nick=new_nick, reason="Support Warteraum")
+                # User wird servergemutet und Nickname geändert
+                await member.edit(nick=new_nick, mute=True, reason="Support Warteraum")
             except discord.Forbidden:
                 pass
 
@@ -76,6 +92,7 @@ class SupportSystem(commands.Cog):
             staff_channel = guild.get_channel(staff_channel_id)
             if not staff_channel: return
 
+            # Nur die HAUPT-Rolle wird gepingt!
             staff_role_id = await self.config.guild(guild).staff_role()
             staff_role = guild.get_role(staff_role_id) if staff_role_id else None
             ping_content = staff_role.mention if staff_role else "@here"
@@ -95,7 +112,6 @@ class SupportSystem(commands.Cog):
             embed.set_footer(text="Supportfall eröffnet")
 
             view = SupportClaimView(self)
-            # FIX: AllowedMentions hinzugefügt, damit der Bot die Rolle wirklich pingt!
             allowed_mentions = discord.AllowedMentions(roles=True, everyone=True)
             msg = await staff_channel.send(content=ping_content, embed=embed, view=view, allowed_mentions=allowed_mentions)
 
@@ -123,7 +139,8 @@ class SupportSystem(commands.Cog):
 
             orig_nick = session["original_nicks"].get(str(member.id), member.name)
             try:
-                await member.edit(nick=orig_nick, reason="Warteraum verlassen")
+                # User wird entmutet und Nickname zurückgesetzt
+                await member.edit(nick=orig_nick, mute=False, reason="Warteraum verlassen")
             except: pass
 
             if after.channel and after.channel.id != waitroom_id:
@@ -136,6 +153,10 @@ class SupportSystem(commands.Cog):
             for msg_id, s_data in list(sessions.items()):
                 if s_data["status"] == "active" and before.channel.id == s_data["channel_id"]:
                     if member.id in s_data["user_ids"]:
+                        # Zur Sicherheit entmutieren, falls er direkt aus dem Support disconnected
+                        try: await member.edit(mute=False, reason="Support verlassen")
+                        except: pass
+
                         remaining_users = [u for u in s_data["user_ids"] if u != member.id]
                         if not remaining_users:
                             await self.end_session(guild, msg_id, "User hat den Channel verlassen")
@@ -154,8 +175,8 @@ class SupportSystem(commands.Cog):
         elif after.channel and before.channel != after.channel:
             for msg_id, s_data in list(sessions.items()):
                 if s_data["status"] == "active" and after.channel.id == s_data["channel_id"]:
-                    staff_role_id = await self.config.guild(guild).staff_role()
-                    if staff_role_id and staff_role_id in [r.id for r in member.roles] and member.id not in s_data["staff_ids"]:
+                    # NEU: is_staff prüft Haupt- und Zusatz-Rollen
+                    if await self.is_staff(member) and member.id not in s_data["staff_ids"]:
                         s_data["staff_ids"].append(member.id)
                         sessions[msg_id] = s_data
                         await self.config.guild(guild).active_sessions.set(sessions)
@@ -164,7 +185,9 @@ class SupportSystem(commands.Cog):
                     for m_id, s_data2 in list(sessions.items()):
                         if s_data2["status"] == "waiting" and member.id in s_data2["user_ids"]:
                             orig_nick = s_data2["original_nicks"].get(str(member.id), member.name)
-                            try: await member.edit(nick=orig_nick, reason="Support zusammengelegt")
+                            try: 
+                                # Wird in den Support gezogen -> Entmuten
+                                await member.edit(nick=orig_nick, mute=False, reason="Support zusammengelegt")
                             except: pass
                             
                             s_data["user_ids"].append(member.id)
@@ -264,7 +287,10 @@ class SupportSystem(commands.Cog):
         channel = guild.get_channel(session["channel_id"]) if session["channel_id"] else None
         if channel:
             for m in channel.members:
-                try: await m.move_to(None, reason="Support beendet")
+                try: 
+                    # Vor dem Kick aus dem Channel entmutieren
+                    await m.edit(mute=False, reason="Support beendet")
+                    await m.move_to(None, reason="Support beendet")
                 except: pass
         
         start_time = datetime.datetime.fromisoformat(session["start_time"])
@@ -324,9 +350,28 @@ class SupportSystem(commands.Cog):
 
     @lsupportsetup.command(name="lstaffrole")
     async def lstaffrole(self, ctx: commands.Context, role: discord.Role):
-        """Setzt die Rolle, die gepingt wird und Support übernehmen darf."""
+        """Setzt die Haupt-Rolle, die GEPINGT wird und Support übernehmen darf."""
         await self.config.guild(ctx.guild).staff_role.set(role.id)
-        await ctx.send(f"✅ Staff-Rolle wurde auf {role.mention} gesetzt.")
+        await ctx.send(f"✅ Haupt-Support-Rolle wurde auf {role.mention} gesetzt.")
+
+    @lsupportsetup.command(name="lextrarole")
+    async def lextrarole(self, ctx: commands.Context, role: discord.Role, action: str = "add"):
+        """Fügt eine Zusatz-Rolle hinzu, die Support übernehmen darf (OHNE Ping). (add/remove)"""
+        extra_roles = await self.config.guild(ctx.guild).extra_staff_roles()
+        if action.lower() == "remove":
+            if role.id in extra_roles:
+                extra_roles.remove(role.id)
+                await self.config.guild(ctx.guild).extra_staff_roles.set(extra_roles)
+                await ctx.send(f"✅ Zusatz-Rolle {role.mention} wurde entfernt.")
+            else:
+                await ctx.send("❌ Diese Rolle ist nicht in der Liste der Zusatz-Rollen.")
+        else:
+            if role.id not in extra_roles:
+                extra_roles.append(role.id)
+                await self.config.guild(ctx.guild).extra_staff_roles.set(extra_roles)
+                await ctx.send(f"✅ Zusatz-Rolle {role.mention} hinzugefügt. Diese kann Support übernehmen, wird aber nicht gepingt.")
+            else:
+                await ctx.send("❌ Diese Rolle ist bereits eine Zusatz-Rolle.")
 
     @lsupportsetup.command(name="llogchannel")
     async def llogchannel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -437,8 +482,8 @@ class SupportClaimView(discord.ui.View):
 
         session = sessions[session_id]
         
-        staff_role_id = await self.cog.config.guild(guild).staff_role()
-        if staff_role_id and staff_role_id not in [r.id for r in interaction.user.roles]:
+        # NEU: Prüft Haupt- ODER Zusatz-Rollen
+        if not await self.cog.is_staff(interaction.user):
             return await interaction.response.send_message("Du bist nicht berechtigt, Support zu übernehmen.", ephemeral=True)
 
         if not interaction.user.voice or not interaction.user.voice.channel:
@@ -452,8 +497,10 @@ class SupportClaimView(discord.ui.View):
                 member = guild.get_member(u_id)
                 if member and member.voice:
                     await member.move_to(interaction.user.voice.channel, reason="Support übernommen")
+                    # User entmutieren beim Übernehmen
+                    await member.edit(mute=False, reason="Support übernommen")
         except discord.Forbidden:
-            return await interaction.response.send_message("Ich habe keine Berechtigung, den Nutzer zu verschieben.", ephemeral=True)
+            return await interaction.response.send_message("Ich habe keine Berechtigung, den Nutzer zu verschieben/entmutieren.", ephemeral=True)
 
         await self.cog.start_support(guild, session_id, interaction.user.voice.channel, interaction.user.id, None)
         await interaction.response.send_message("Du hast den Supportfall übernommen.", ephemeral=True)
@@ -474,8 +521,8 @@ class SupportCloseView(discord.ui.View):
             return await interaction.response.send_message("Session nicht gefunden.", ephemeral=True)
             
         session = sessions[session_id]
-        staff_role_id = await self.cog.config.guild(guild).staff_role()
-        if staff_role_id and staff_role_id not in [r.id for r in interaction.user.roles]:
+        # NEU: Prüft Haupt- ODER Zusatz-Rollen
+        if not await self.cog.is_staff(interaction.user):
              return await interaction.response.send_message("Du bist nicht berechtigt, den Support zu beenden.", ephemeral=True)
 
         await self.cog.end_session(guild, session_id, "Von Teamler beendet")
