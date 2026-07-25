@@ -23,13 +23,14 @@ class SupportSystem(commands.Cog):
             "cooldown": 300,
             "active_sessions": {},
             "cooldowns": {},
-            "stats": {}
+            "stats": {},
+            "user_history": {} # NEU: Speichert die Support-Akten der User
         }
         self.config.register_guild(**default_guild)
 
     async def cog_load(self):
         self.bot.add_view(SupportClaimView(self))
-        self.bot.add_view(SupportCloseView(self))
+        self.bot.add_view(SupportControlView(self)) # Umbenannt für Close & Backup
 
     async def is_staff(self, member: discord.Member):
         guild = member.guild
@@ -50,12 +51,11 @@ class SupportSystem(commands.Cog):
 
     async def get_mover(self, guild, target_member):
         try:
-            await asyncio.sleep(1) # Warte 1 Sekunde, damit Discord das Audit Log schreiben kann
+            await asyncio.sleep(1)
             now = datetime.datetime.now(datetime.timezone.utc)
             async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_move):
                 if (now - entry.created_at).total_seconds() < 15:
                     if entry.target and entry.target.id == target_member.id:
-                        # WICHTIG: Ignoriere den Bot selbst als Mover
                         if entry.user.id != self.bot.user.id:
                             return entry.user.id
         except discord.Forbidden:
@@ -92,15 +92,15 @@ class SupportSystem(commands.Cog):
 
         elif before.channel and after.channel and before.channel != after.channel:
             await self.handle_support_leave(member, guild, before.channel)
-            await self.handle_support_join(member, guild, after.channel)
+            await self.handle_support_join(member, guild, after_channel)
             return
             
         elif before.channel and not after.channel:
-            await self.handle_support_leave(member, guild, before.channel)
+            await self.handle_support_leave(member, guild, before_channel)
             return
 
         elif after.channel and not before.channel:
-            await self.handle_support_join(member, guild, after.channel)
+            await self.handle_support_join(member, guild, after_channel)
             return
 
     async def handle_waitroom_join(self, member, guild):
@@ -340,7 +340,6 @@ class SupportSystem(commands.Cog):
         claimer_str = "Manuell gezogen"
         do_update = False
         
-        # FIX: Idempotent gemacht. Wenn der Fall schon aktiv ist, überschreibt er nicht mehr die Startzeit.
         async with self.config.guild(guild).active_sessions() as sessions:
             if session_id not in sessions: return
             session = sessions[session_id]
@@ -409,7 +408,8 @@ class SupportSystem(commands.Cog):
 
         embed.set_footer(text="Support läuft..." if session["status"] == "active" else "Support beendet")
         
-        view = SupportCloseView(self) if session["status"] == "active" else None
+        # NEU: SupportControlView statt SupportCloseView
+        view = SupportControlView(self) if session["status"] == "active" else None
         try:
             await msg.edit(content=None, embed=embed, view=view)
         except: pass
@@ -449,6 +449,20 @@ class SupportSystem(commands.Cog):
                         stats[str(s_id)]["count"] += 1
                         stats[str(s_id)]["duration"] += duration
             
+            # NEU: User Historie (Akte) speichern
+            async with self.config.guild(guild).user_history() as history:
+                for u_id in user_ids_to_kick:
+                    if str(u_id) not in history:
+                        history[str(u_id)] = []
+                    history[str(u_id)].append({
+                        "end_time": end_time.isoformat(),
+                        "duration": (end_time - s_start).total_seconds(),
+                        "staff_ids": staff_ids,
+                        "reason": reason
+                    })
+                    # Nur die letzten 10 Einträge pro User speichern, um die Config sauber zu halten
+                    history[str(u_id)] = history[str(u_id)][-10:]
+
             del sessions[session_id]
         
         if channel_id:
@@ -575,7 +589,6 @@ class SupportSystem(commands.Cog):
         await self.config.guild(ctx.guild).cooldowns.set({})
         await ctx.send("✅ Alle aktiven Support-Sessions und Cooldowns wurden zurückgesetzt.")
         
-        # FIX: Durchsucht JEDEN Voice-Channel nach hängengebliebenen Supportern
         for vc in ctx.guild.voice_channels:
             for m in vc.members:
                 try:
@@ -651,6 +664,60 @@ class SupportSystem(commands.Cog):
         embed.set_footer(text="Live-Status")
         await ctx.send(embed=embed)
 
+    # NEU: Vorschlag 9 - User Akte / Historie
+    @commands.command(name="lsupportuser")
+    @commands.mod_or_permissions(manage_messages=True)
+    async def lsupportuser(self, ctx: commands.Context, member: discord.Member):
+        """Zeigt die Support-Historie (Akte) eines Users an."""
+        history = await self.config.guild(ctx.guild).user_history()
+        blacklist = await self.config.guild(ctx.guild).blacklist()
+        cooldowns = await self.config.guild(ctx.guild).cooldowns()
+        
+        user_history = history.get(str(member.id), [])
+        
+        embed = discord.Embed(title="📁 Support-Akte", color=discord.Color.dark_blue(), timestamp=datetime.datetime.now(datetime.timezone.utc))
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="👤 Nutzer", value=f"{member.mention} (`{member.id}`)", inline=False)
+        
+        status_text = ""
+        if member.id in blacklist:
+            status_text += "🚫 **Gesperrt (Blacklist)**\n"
+        
+        if str(member.id) in cooldowns:
+            end_time = datetime.datetime.fromisoformat(cooldowns[str(member.id)])
+            if datetime.datetime.now(datetime.timezone.utc) < end_time:
+                time_left = int((end_time - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+                status_text += f"⏳ **Im Cooldown** (noch {time_left}s)\n"
+            else:
+                status_text += "✅ Nicht im Cooldown\n"
+        else:
+            status_text += "✅ Nicht im Cooldown\n"
+            
+        if not status_text:
+            status_text = "✅ Keine Einschränkungen"
+            
+        embed.add_field(name="🛡️ Aktueller Status", value=status_text, inline=False)
+        embed.add_field(name="📊 Gesamte Supportfälle", value=str(len(user_history)), inline=False)
+        
+        if user_history:
+            recent_cases = user_history[-3:] # Letzte 3 Fälle
+            cases_text = ""
+            for i, case in enumerate(recent_cases, 1):
+                end_time = datetime.datetime.fromisoformat(case["end_time"])
+                duration_str = self.format_timedelta(datetime.timedelta(seconds=case.get("duration", 0)))
+                staff_list = ", ".join([f"<@{s}>" for s in case.get("staff_ids", [])]) or "Unbekannt"
+                reason = case.get("reason", "Unbekannt")
+                
+                cases_text += f"**Fall {i}** ({end_time.strftime('%d.%m.%Y')}):\n"
+                cases_text += f"⏱️ Dauer: {duration_str} | 🎧 Teamler: {staff_list}\n"
+                cases_text += f"🚪 Grund: {reason}\n\n"
+                
+            embed.add_field(name="📜 Verlauf (Letzte 3)", value=cases_text[:1024], inline=False)
+        else:
+            embed.add_field(name="📜 Verlauf", value="Dieser User hatte bisher noch keine Supportfälle.", inline=False)
+            
+        await ctx.send(embed=embed)
+
 
 class SupportClaimView(discord.ui.View):
     def __init__(self, cog: SupportSystem):
@@ -697,12 +764,13 @@ class SupportClaimView(discord.ui.View):
         await interaction.followup.send("Du hast den Supportfall übernommen.", ephemeral=True)
 
 
-class SupportCloseView(discord.ui.View):
+# NEU: SupportControlView (Beenden + Backup rufen)
+class SupportControlView(discord.ui.View):
     def __init__(self, cog: SupportSystem):
         super().__init__(timeout=None)
         self.cog = cog
 
-    @discord.ui.button(label="Support beenden", style=discord.ButtonStyle.danger, custom_id="support_close_btn_persistent")
+    @discord.ui.button(label="Support beenden", style=discord.ButtonStyle.danger, custom_id="support_close_btn_persistent", emoji="🛑")
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         session_id = str(interaction.message.id)
@@ -713,6 +781,43 @@ class SupportCloseView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         await self.cog.end_session(guild, session_id, "Von Teamler beendet")
         await interaction.followup.send("Support wurde beendet. Der User wurde aus dem Channel entfernt.", ephemeral=True)
+
+    # NEU: Vorschlag 8 - Backup Button
+    @discord.ui.button(label="Backup rufen", style=discord.ButtonStyle.secondary, custom_id="support_backup_btn_persistent", emoji="🆘")
+    async def backup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        session_id = str(interaction.message.id)
+        
+        if not await self.cog.is_staff(interaction.user):
+            return await interaction.response.send_message("Du bist nicht berechtigt, Backup zu rufen.", ephemeral=True)
+
+        sessions = await self.cog.config.guild(guild).active_sessions()
+        if session_id not in sessions:
+            return await interaction.response.send_message("Dieser Supportfall existiert nicht mehr.", ephemeral=True)
+            
+        session = sessions[session_id]
+        
+        staff_channel = guild.get_channel(await self.cog.config.guild(guild).staff_channel())
+        if not staff_channel:
+            return await interaction.response.send_message("Staff-Channel nicht gefunden.", ephemeral=True)
+
+        staff_role_id = await self.cog.config.guild(guild).staff_role()
+        staff_role = guild.get_role(staff_role_id) if staff_role_id else None
+        ping_content = staff_role.mention if staff_role else "@here"
+        
+        users_mention = ", ".join([f"<@{u}>" for u in session.get("user_ids", [])])
+        channel_mention = f"<#{session.get('channel_id')}>"
+        
+        backup_embed = discord.Embed(
+            title="🚨 BACKUP ANGEFORDERT!",
+            description=f"{interaction.user.mention} braucht dringend Hilfe im Support mit {users_mention}!\nChannel: {channel_mention}",
+            color=discord.Color.red()
+        )
+        
+        allowed_mentions = discord.AllowedMentions(roles=True, everyone=True, users=True)
+        await staff_channel.send(content=ping_content, embed=backup_embed, allowed_mentions=allowed_mentions)
+        
+        await interaction.response.send_message("🆘 Backup-Truppe wurde angefordert!", ephemeral=True)
 
 
 async def setup(bot: Red):
