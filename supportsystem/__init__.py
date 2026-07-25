@@ -24,13 +24,13 @@ class SupportSystem(commands.Cog):
             "active_sessions": {},
             "cooldowns": {},
             "stats": {},
-            "user_history": {} # NEU: Speichert die Support-Akten der User
+            "user_history": {}
         }
         self.config.register_guild(**default_guild)
 
     async def cog_load(self):
         self.bot.add_view(SupportClaimView(self))
-        self.bot.add_view(SupportControlView(self)) # Umbenannt für Close & Backup
+        self.bot.add_view(SupportControlView(self))
 
     async def is_staff(self, member: discord.Member):
         guild = member.guild
@@ -66,19 +66,14 @@ class SupportSystem(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
-        if member.bot:
-            return
-
-        if before.channel == after.channel:
-            return
+        if member.bot: return
+        if before.channel == after.channel: return
 
         guild = member.guild
-        if not guild:
-            return
+        if not guild: return
 
         waitroom_id = await self.config.guild(guild).waitroom()
-        if not waitroom_id:
-            return
+        if not waitroom_id: return
 
         is_staff_member = await self.is_staff(member)
 
@@ -92,15 +87,15 @@ class SupportSystem(commands.Cog):
 
         elif before.channel and after.channel and before.channel != after.channel:
             await self.handle_support_leave(member, guild, before.channel)
-            await self.handle_support_join(member, guild, after_channel)
+            await self.handle_support_join(member, guild, after.channel)
             return
             
         elif before.channel and not after.channel:
-            await self.handle_support_leave(member, guild, before_channel)
+            await self.handle_support_leave(member, guild, before.channel)
             return
 
         elif after.channel and not before.channel:
-            await self.handle_support_join(member, guild, after_channel)
+            await self.handle_support_join(member, guild, after.channel)
             return
 
     async def handle_waitroom_join(self, member, guild):
@@ -141,8 +136,7 @@ class SupportSystem(commands.Cog):
             
             try:
                 await member.edit(nick=new_nick, mute=True, reason="Support Warteraum")
-            except discord.Forbidden:
-                pass
+            except discord.Forbidden: pass
 
             staff_channel_id = await self.config.guild(guild).staff_channel()
             staff_channel = guild.get_channel(staff_channel_id)
@@ -218,10 +212,16 @@ class SupportSystem(commands.Cog):
                         sessions[active_session_id]["user_ids"].append(member.id)
                         sessions[active_session_id]["original_nicks"][str(member.id)] = waiting_session["original_nicks"].get(str(member.id), member.name)
                         
+                        # FIX: Audit Log UND Channel Scan
                         if claimer_id and claimer_id not in sessions[active_session_id]["staff_ids"]:
                             mover = guild.get_member(claimer_id)
                             if mover and await self.is_staff(mover):
                                 sessions[active_session_id]["staff_ids"].append(claimer_id)
+                        
+                        # Fallback: Teamler im Channel scannen
+                        for m in after_channel.members:
+                            if await self.is_staff(m) and m.id not in sessions[active_session_id]["staff_ids"]:
+                                sessions[active_session_id]["staff_ids"].append(m.id)
                 
                 try:
                     staff_c_id = await self.config.guild(guild).staff_channel()
@@ -354,17 +354,24 @@ class SupportSystem(commands.Cog):
                     session["channel_id"] = channel.id
                     do_update = True
                 
-            if claimer_id and claimer_id not in session["staff_ids"]:
-                mover = guild.get_member(claimer_id)
-                if mover and await self.is_staff(mover):
-                    session["staff_ids"].append(claimer_id)
-                    claimer_str = f"<@{claimer_id}>"
-                    do_update = True
+            # FIX: Prüfe Claimer ID (Button Klick oder Audit Log)
+            if claimer_id:
+                if claimer_id not in session["staff_ids"]:
+                    mover = guild.get_member(claimer_id)
+                    if mover and await self.is_staff(mover):
+                        session["staff_ids"].append(claimer_id)
+                        claimer_str = f"<@{claimer_id}>"
+                        do_update = True
                 else:
-                    if session["status"] != "active":
-                        claimer_str = "Manuell gezogen (kein Teamler)"
-            elif claimer_id:
-                 claimer_str = f"<@{claimer_id}>"
+                    claimer_str = f"<@{claimer_id}>"
+            
+            # FALLBACK: Wenn kein Claimer eingetragen wurde (z.B. Audit Log fehlt), scanne den Channel!
+            for m in channel.members:
+                if await self.is_staff(m) and m.id not in session["staff_ids"]:
+                    session["staff_ids"].append(m.id)
+                    do_update = True
+                    if claimer_str == "Manuell gezogen":
+                        claimer_str = f"<@{m.id}>"
                  
         if do_update:
             await self.update_embed(guild, session_id, "✅ Supportfall übernommen", f"Übernommen durch: {claimer_str}\nIn Channel: {channel.mention}")
@@ -382,11 +389,18 @@ class SupportSystem(commands.Cog):
             async with self.config.guild(guild).active_sessions() as sessions:
                 if session_id in sessions: del sessions[session_id]
             return
-        except:
-            return
+        except: return
             
         embed = msg.embeds[0]
-        embed.color = discord.Color.green() if session["status"] == "active" else discord.Color.red()
+        
+        # NEU: Farbe anpassen je nach Status (Pause = Gelb)
+        if "pause" in session.get("status", ""):
+            embed.color = discord.Color.yellow()
+        elif session["status"] == "active":
+            embed.color = discord.Color.green()
+        else:
+            embed.color = discord.Color.red()
+            
         embed.title = title
         
         embed.clear_fields()
@@ -408,13 +422,12 @@ class SupportSystem(commands.Cog):
 
         embed.set_footer(text="Support läuft..." if session["status"] == "active" else "Support beendet")
         
-        # NEU: SupportControlView statt SupportCloseView
-        view = SupportControlView(self) if session["status"] == "active" else None
+        view = SupportControlView(self) if session["status"] in ["active", "paused"] else None
         try:
             await msg.edit(content=None, embed=embed, view=view)
         except: pass
 
-    async def end_session(self, guild, session_id, reason="Beendet"):
+    async def end_session(self, guild, session_id, reason="Beendet", note=None):
         user_ids_to_kick = []
         channel_id = None
         end_time = datetime.datetime.now(datetime.timezone.utc)
@@ -449,7 +462,6 @@ class SupportSystem(commands.Cog):
                         stats[str(s_id)]["count"] += 1
                         stats[str(s_id)]["duration"] += duration
             
-            # NEU: User Historie (Akte) speichern
             async with self.config.guild(guild).user_history() as history:
                 for u_id in user_ids_to_kick:
                     if str(u_id) not in history:
@@ -458,9 +470,9 @@ class SupportSystem(commands.Cog):
                         "end_time": end_time.isoformat(),
                         "duration": (end_time - s_start).total_seconds(),
                         "staff_ids": staff_ids,
-                        "reason": reason
+                        "reason": reason,
+                        "note": note # NEU: Notiz speichern
                     })
-                    # Nur die letzten 10 Einträge pro User speichern, um die Config sauber zu halten
                     history[str(u_id)] = history[str(u_id)][-10:]
 
             del sessions[session_id]
@@ -493,6 +505,11 @@ class SupportSystem(commands.Cog):
                 embed.add_field(name="⏱️ Wartezeit", value=wait_dur, inline=True)
                 embed.add_field(name="⏳ Supportzeit", value=supp_dur, inline=True)
                 embed.add_field(name="🚪 Grund", value=reason, inline=False)
+                
+                # NEU: Notiz ins Embed einfügen, falls vorhanden
+                if note:
+                    embed.add_field(name="📝 Notiz", value=note, inline=False)
+                
                 embed.set_footer(text=f"Beendet am {end_time.strftime('%d.%m.%Y %H:%M')}")
                 
                 await msg.edit(content=None, embed=embed, view=None)
@@ -634,12 +651,13 @@ class SupportSystem(commands.Cog):
                 users = ", ".join([f"<@{u}>" for u in s_data.get("user_ids", [])])
                 waiting_users.append(f"👤 {users} (wartet: {wait_duration})")
                 
-            elif s_data.get("status") == "active":
+            elif s_data.get("status") in ["active", "paused"]:
                 users = ", ".join([f"<@{u}>" for u in s_data.get("user_ids", [])])
                 staff = ", ".join([f"<@{s}>" for s in s_data.get("staff_ids", [])]) if s_data.get("staff_ids") else "Unbekannt"
                 channel = ctx.guild.get_channel(s_data.get("channel_id", 0))
                 chan_name = channel.mention if channel else "Unbekannt"
-                active_supports.append(f"🎧 {staff} ➔ {users} ({chan_name})")
+                status_emoji = "⏸️" if s_data.get("status") == "paused" else "🎤"
+                active_supports.append(f"{status_emoji} {staff} ➔ {users} ({chan_name})")
         
         embed = discord.Embed(title="📋 Support Live-Übersicht", color=discord.Color.blue(), timestamp=datetime.datetime.now(datetime.timezone.utc))
         
@@ -664,7 +682,6 @@ class SupportSystem(commands.Cog):
         embed.set_footer(text="Live-Status")
         await ctx.send(embed=embed)
 
-    # NEU: Vorschlag 9 - User Akte / Historie
     @commands.command(name="lsupportuser")
     @commands.mod_or_permissions(manage_messages=True)
     async def lsupportuser(self, ctx: commands.Context, member: discord.Member):
@@ -700,17 +717,21 @@ class SupportSystem(commands.Cog):
         embed.add_field(name="📊 Gesamte Supportfälle", value=str(len(user_history)), inline=False)
         
         if user_history:
-            recent_cases = user_history[-3:] # Letzte 3 Fälle
+            recent_cases = user_history[-3:] 
             cases_text = ""
             for i, case in enumerate(recent_cases, 1):
                 end_time = datetime.datetime.fromisoformat(case["end_time"])
                 duration_str = self.format_timedelta(datetime.timedelta(seconds=case.get("duration", 0)))
                 staff_list = ", ".join([f"<@{s}>" for s in case.get("staff_ids", [])]) or "Unbekannt"
                 reason = case.get("reason", "Unbekannt")
+                note = case.get("note", "")
                 
                 cases_text += f"**Fall {i}** ({end_time.strftime('%d.%m.%Y')}):\n"
                 cases_text += f"⏱️ Dauer: {duration_str} | 🎧 Teamler: {staff_list}\n"
-                cases_text += f"🚪 Grund: {reason}\n\n"
+                cases_text += f"🚪 Grund: {reason}\n"
+                if note:
+                    cases_text += f"📝 Notiz: {note}\n"
+                cases_text += "\n"
                 
             embed.add_field(name="📜 Verlauf (Letzte 3)", value=cases_text[:1024], inline=False)
         else:
@@ -754,8 +775,7 @@ class SupportClaimView(discord.ui.View):
                     orig_nick = sessions[session_id].get("original_nicks", {}).get(str(member.id), member.name)
                     await member.edit(mute=False, nick=orig_nick, reason="Support übernommen")
                     moved_any = True
-                except:
-                    pass
+                except: pass
                     
         if not moved_any:
             return await interaction.followup.send("Ich konnte keinen Nutzer verschieben (vielleicht haben sie den Voice bereits verlassen?).", ephemeral=True)
@@ -764,25 +784,40 @@ class SupportClaimView(discord.ui.View):
         await interaction.followup.send("Du hast den Supportfall übernommen.", ephemeral=True)
 
 
-# NEU: SupportControlView (Beenden + Backup rufen)
+# NEU: Vorschlag 8 (Backup), Vorschlag 12 (Pause), Vorschlag 13 (Notiz)
 class SupportControlView(discord.ui.View):
     def __init__(self, cog: SupportSystem):
         super().__init__(timeout=None)
         self.cog = cog
 
-    @discord.ui.button(label="Support beenden", style=discord.ButtonStyle.danger, custom_id="support_close_btn_persistent", emoji="🛑")
-    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary, custom_id="support_pause_btn_persistent", emoji="⏸️")
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         session_id = str(interaction.message.id)
         
         if not await self.cog.is_staff(interaction.user):
-            return await interaction.response.send_message("Du bist nicht berechtigt, den Support zu beenden.", ephemeral=True)
+            return await interaction.response.send_message("Du bist nicht berechtigt.", ephemeral=True)
 
-        await interaction.response.defer(ephemeral=True)
-        await self.cog.end_session(guild, session_id, "Von Teamler beendet")
-        await interaction.followup.send("Support wurde beendet. Der User wurde aus dem Channel entfernt.", ephemeral=True)
+        async with self.cog.config.guild(guild).active_sessions() as sessions:
+            if session_id not in sessions: return
+            session = sessions[session_id]
+            
+            if session["status"] == "active":
+                session["status"] = "paused"
+                msg = "Support pausiert (Teamler prüft kurz)."
+                button.label = "Weiter"
+                button.emoji = "▶️"
+            elif session["status"] == "paused":
+                session["status"] = "active"
+                msg = "Support wird fortgesetzt."
+                button.label = "Pause"
+                button.emoji = "⏸️"
+            else:
+                return
 
-    # NEU: Vorschlag 8 - Backup Button
+        await self.cog.update_embed(guild, session_id, "⏸️ Status Update", msg)
+        await interaction.response.edit_message(view=self)
+
     @discord.ui.button(label="Backup rufen", style=discord.ButtonStyle.secondary, custom_id="support_backup_btn_persistent", emoji="🆘")
     async def backup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
@@ -818,6 +853,42 @@ class SupportControlView(discord.ui.View):
         await staff_channel.send(content=ping_content, embed=backup_embed, allowed_mentions=allowed_mentions)
         
         await interaction.response.send_message("🆘 Backup-Truppe wurde angefordert!", ephemeral=True)
+
+    @discord.ui.button(label="Beenden", style=discord.ButtonStyle.danger, custom_id="support_close_btn_persistent", emoji="🛑")
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        session_id = str(interaction.message.id)
+        
+        if not await self.cog.is_staff(interaction.user):
+            return await interaction.response.send_message("Du bist nicht berechtigt, den Support zu beenden.", ephemeral=True)
+
+        # NEU: Notiz-Modal öffnen
+        modal = CloseNoteModal(self.cog, session_id)
+        await interaction.response.send_modal(modal)
+
+
+# NEU: Modal für Vorschlag 13 (Abschluss-Notiz)
+class CloseNoteModal(discord.ui.Modal, title="Support beenden - Notiz"):
+    def __init__(self, cog: SupportSystem, session_id: str):
+        super().__init__()
+        self.cog = cog
+        self.session_id = session_id
+
+    note_input = discord.ui.TextInput(
+        label="Kurze Notiz zum Fall (optional)",
+        placeholder="z.B. User hatte Audio-Probleme, Treiber aktualisiert.",
+        required=False,
+        max_length=500,
+        style=discord.TextStyle.paragraph
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        note = self.note_input.value if self.note_input.value else None
+        
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.end_session(guild, self.session_id, "Von Teamler beendet", note)
+        await interaction.followup.send("Support wurde beendet. Der User wurde aus dem Channel entfernt.", ephemeral=True)
 
 
 async def setup(bot: Red):
