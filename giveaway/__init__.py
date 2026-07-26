@@ -6,7 +6,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 class GiveawaySystem(commands.Cog):
-    """Das ultimative, moderne Giveaway System."""
+    """Das ultimative, 100% stabile Giveaway System mit Reaktionen."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -21,6 +21,7 @@ class GiveawaySystem(commands.Cog):
         self.giveaway_task.cancel()
 
     async def giveaway_looper(self):
+        """Background task der prüft ob Giveaways abgelaufen sind."""
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
             try:
@@ -57,19 +58,6 @@ class GiveawaySystem(commands.Cog):
             elif unit == 'd': delta += timedelta(days=value)
         return delta
 
-    def get_giveaway_view(self, participant_count=0, ended=False, required_role_id=None):
-        view = discord.ui.View()
-        if ended:
-            button = discord.ui.Button(style=discord.ButtonStyle.danger, label=f"Beendet • {participant_count} Teilnehmer", disabled=True)
-        else:
-            label = f"🎉 Mitmachen! ({participant_count} Teilnehmer)"
-            if required_role_id:
-                label = f"🎉 Mitmachen! ({participant_count} Teilnehmer) [Rolle nötig]"
-            button = discord.ui.Button(style=discord.ButtonStyle.success, label=label, custom_id="giveaway_join")
-            button.callback = self.button_callback
-        view.add_item(button)
-        return view
-
     async def create_giveaway_embed(self, guild, gw_data, is_ended=False):
         end_time = datetime.fromisoformat(gw_data["end_time"])
         unix_timestamp = int(end_time.timestamp())
@@ -105,18 +93,17 @@ class GiveawaySystem(commands.Cog):
                 description=(
                     f"**Preis:** {gw_data['prize']}\n\n"
                     f"⏳ **Endet:** <t:{unix_timestamp}:R> (<t:{unix_timestamp}:f>)\n"
-                    f"👑 **Veranstaltet von:** {host_mention}\n"
-                    f"👥 **Teilnehmer:** {len(gw_data['participants'])}\n\n"
+                    f"👑 **Veranstaltet von:** {host_mention}\n\n"
                     f"✅ **Benötigte Rolle:** {req_role_text}\n"
                     f"⭐ **Bonus:** {bonus_text}\n"
                     f"🚫 **Ausgeschlossen:** {blacklist_text}\n"
                     f"🤝 **Sponsor:** {sponsor_text}\n\n"
-                    f"*Klicke unten auf den Button um teilzunehmen!*"
+                    f"*Reagiere unten mit 🎉 um teilzunehmen!*"
                 ),
                 color=discord.Color.gold(),
                 timestamp=end_time
             )
-            embed.set_footer(text=f"Giveaway ID: {gw_data['message_id']} • Klick = An/Abmeldung")
+            embed.set_footer(text=f"Giveaway ID: {gw_data['message_id']}")
             if gw_data.get("image_url"):
                 embed.set_image(url=gw_data["image_url"])
         else:
@@ -256,8 +243,8 @@ class GiveawaySystem(commands.Cog):
         end_time = datetime.now(timezone.utc) + delta
         gw_data = {
             "prize": prize, "winners_count": winners_count, "end_time": end_time.isoformat(),
-            "host_id": host_id, "channel_id": target_channel.id, "message_id": 9999, # Platzhalter für Vorschau
-            "winners": [], "participants": [], "required_role_id": required_role_id,
+            "host_id": host_id, "channel_id": target_channel.id, "message_id": 9999,
+            "winners": [], "required_role_id": required_role_id,
             "bonus_role_id": bonus_role_id, "blacklisted_roles": bl_roles, "blacklisted_users": bl_users,
             "sponsor": sponsor, "image_url": image_url, "ended": False
         }
@@ -271,10 +258,9 @@ class GiveawaySystem(commands.Cog):
             if interaction.user != ctx.author:
                 return await interaction.response.send_message("Nur der Ersteller kann das bestätigen.", ephemeral=True)
             
-            real_view = self.get_giveaway_view(0, required_role_id=required_role_id)
-            real_msg = await target_channel.send(embed=embed, view=real_view)
+            real_msg = await target_channel.send(embed=embed)
+            await real_msg.add_reaction("🎉")
             
-            # WICHTIG: ID aktualisieren, damit sie im finalen Embed nicht 9999 ist
             gw_data["message_id"] = real_msg.id
             final_embed = await self.create_giveaway_embed(ctx.guild, gw_data)
             await real_msg.edit(embed=final_embed)
@@ -304,7 +290,7 @@ class GiveawaySystem(commands.Cog):
         async with self.config.guild(ctx.guild).giveaways() as giveaways:
             if str(message_id) not in giveaways: return await ctx.send("❌ Giveaway nicht gefunden.")
             gw_data = giveaways[str(message_id)]
-            if gw_data.get("ended"): return await ctx.send("❌ Already beendet.")
+            if gw_data.get("ended"): return await ctx.send("❌ Bereits beendet.")
             channel = ctx.guild.get_channel(gw_data["channel_id"])
             if channel: await self.end_giveaway(ctx.guild, channel, message_id, gw_data)
             gw_data["ended"] = True
@@ -341,7 +327,7 @@ class GiveawaySystem(commands.Cog):
                 unix_ts = int(end_time.timestamp())
                 embed.add_field(
                     name=f"🎁 {gw['prize']}",
-                    value=f"**ID:** [{gw['message_id']}](https://discord.com/channels/{ctx.guild.id}/{gw['channel_id']}/{gw['message_id']})\n**Endet:** <t:{unix_ts}:R>\n**Teilnehmer:** {len(gw['participants'])}",
+                    value=f"**ID:** [{gw['message_id']}](https://discord.com/channels/{ctx.guild.id}/{gw['channel_id']}/{gw['message_id']})\n**Endet:** <t:{unix_ts}:R>",
                     inline=False
                 )
             await ctx.send(embed=embed)
@@ -356,8 +342,10 @@ class GiveawaySystem(commands.Cog):
             if str(message_id) not in giveaways: return await ctx.send("❌ Nicht gefunden.")
             gw_data = giveaways[str(message_id)]
             if not gw_data.get("ended"): return await ctx.send("❌ Muss erst beendet sein!")
-            participants = gw_data["participants"]
-            if not participants: return await ctx.send("❌ Keine Teilnehmer.")
+
+            # Für Reroll nutzen wir die gespeicherten Teilnehmer aus der Datenbank
+            participants = gw_data.get("participants", [])
+            if not participants: return await ctx.send("❌ Keine Teilnehmer in der Datenbank gespeichert.")
 
             bonus_role_id = gw_data.get("bonus_role_id")
             pool = []
@@ -383,7 +371,7 @@ class GiveawaySystem(commands.Cog):
                 if old_embed:
                     old_embed.color = discord.Color.orange()
                     old_embed.add_field(name="🔄 Rerolled", value=f"Neue Gewinner: {winner_mentions}", inline=False)
-                    await old_msg.edit(embed=old_embed, view=self.get_giveaway_view(len(participants), ended=True))
+                    await old_msg.edit(embed=old_embed)
             except: pass
             await ctx.send(f"🔄 **Reroll!** Neue Gewinner: {winner_mentions}!")
 
@@ -392,19 +380,36 @@ class GiveawaySystem(commands.Cog):
             msg = await channel.fetch_message(message_id)
         except: return
 
-        participants = gw_data["participants"]
-        num_winners = min(gw_data["winners_count"], len(participants))
+        reaction = discord.utils.find(lambda r: str(r.emoji) == "🎉", msg.reactions)
+        users = []
+        if reaction:
+            users = [user async for user in reaction.users() if not user.bot]
+
+        valid_users = []
+        for user in users:
+            member = guild.get_member(user.id)
+            if not member: continue
+            
+            if gw_data.get("required_role_id") and not any(r.id == gw_data["required_role_id"] for r in member.roles):
+                continue
+            if any(r.id in gw_data.get("blacklisted_roles", []) for r in member.roles):
+                continue
+            if user.id in gw_data.get("blacklisted_users", []):
+                continue
+                
+            valid_users.append(member)
+
+        num_winners = min(gw_data["winners_count"], len(valid_users))
         winners = []
         
         if num_winners > 0:
             bonus_role_id = gw_data.get("bonus_role_id")
             pool = []
-            for uid in participants:
-                member = guild.get_member(uid)
-                if member and bonus_role_id and any(r.id == bonus_role_id for r in member.roles):
-                    pool.extend([uid, uid])
+            for member in valid_users:
+                if bonus_role_id and any(r.id == bonus_role_id for r in member.roles):
+                    pool.extend([member.id, member.id])
                 else:
-                    pool.append(uid)
+                    pool.append(member.id)
 
             for _ in range(num_winners):
                 if not pool: break
@@ -413,9 +418,14 @@ class GiveawaySystem(commands.Cog):
                 pool = [x for x in pool if x != w]
 
         gw_data["winners"] = winners
+        gw_data["participants"] = [u.id for u in valid_users] # WICHTIG: Speichern für spätere Rerolls!
+        
         embed = await self.create_giveaway_embed(guild, gw_data, is_ended=True)
-        view = self.get_giveaway_view(len(participants), ended=True)
-        await msg.edit(embed=embed, view=view)
+        
+        try:
+            await msg.edit(embed=embed)
+            await msg.clear_reactions()
+        except: pass
         
         if winners:
             winner_mentions = " ".join(f"<@{wid}>" for wid in winners)
@@ -435,54 +445,42 @@ class GiveawaySystem(commands.Cog):
         else:
             await channel.send(f"😢 Das Giveaway für **{gw_data['prize']}** wurde beendet, aber es gab keine gültigen Teilnehmer.")
 
-    async def button_callback(self, interaction: discord.Interaction):
-        guild = interaction.guild
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        """Löscht sofort Reaktionen von Leuten, die nicht teilnehmen dürfen."""
+        if payload.user_id == self.bot.user.id or str(payload.emoji) != "🎉":
+            return
+            
+        guild = self.bot.get_guild(payload.guild_id)
         if not guild: return
-
+        
+        is_invalid = False
+        
         async with self.config.guild(guild).giveaways() as giveaways:
-            msg_id_str = str(interaction.message.id)
-            if msg_id_str not in giveaways: 
-                return await interaction.response.send_message("Existiert nicht mehr.", ephemeral=True)
+            msg_id_str = str(payload.message_id)
+            if msg_id_str not in giveaways: return
             
             gw = giveaways[msg_id_str]
-            if gw.get("ended"): 
-                return await interaction.response.send_message("Bereits beendet!", ephemeral=True)
-
-            member = interaction.user
-            user_id = member.id
-
-            required_role_id = gw.get("required_role_id")
-            if required_role_id:
-                if not any(r.id == required_role_id for r in member.roles):
-                    role = guild.get_role(required_role_id)
-                    return await interaction.response.send_message(f"❌ Du brauchst die Rolle **{role.name if role else 'Unbekannt'}**!", ephemeral=True)
+            if gw.get("ended"): return
             
+            member = guild.get_member(payload.user_id)
+            if not member or member.bot: return
+            
+            if gw.get("required_role_id") and not any(r.id == gw["required_role_id"] for r in member.roles):
+                is_invalid = True
             if any(r.id in gw.get("blacklisted_roles", []) for r in member.roles):
-                return await interaction.response.send_message("🚫 Du hast eine ausgeschlossene Rolle!", ephemeral=True)
-            if user_id in gw.get("blacklisted_users", []):
-                return await interaction.response.send_message("🚫 Du wurdest ausgeschlossen!", ephemeral=True)
-
-            if user_id in gw["participants"]:
-                gw["participants"].remove(user_id)
-                joined = False
-            else:
-                gw["participants"].append(user_id)
-                joined = True
-            
-            participant_count = len(gw["participants"])
-            gw_copy = gw.copy()
-
-        embed = await self.create_giveaway_embed(guild, gw_copy)
-        view = self.get_giveaway_view(participant_count, required_role_id=gw_copy.get("required_role_id"))
-        await interaction.response.edit_message(embed=embed, view=view)
-        
-        if joined:
-            msg = "✅ Du nimmst erfolgreich am Giveaway teil!"
-            if gw_copy.get("bonus_role_id") and any(r.id == gw_copy["bonus_role_id"] for r in member.roles):
-                msg += " (⭐ Bonus-Chance aktiv!)"
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.followup.send("❌ Teilnahme zurückgezogen.", ephemeral=True)
+                is_invalid = True
+            if payload.user_id in gw.get("blacklisted_users", []):
+                is_invalid = True
+                
+        # Wenn der User nicht teilnehmen darf, sofort Reaktion löschen!
+        if is_invalid:
+            channel = guild.get_channel(payload.channel_id)
+            if channel:
+                try:
+                    msg = await channel.fetch_message(payload.message_id)
+                    await msg.remove_reaction("🎉", member)
+                except: pass
 
 async def setup(bot):
     await bot.add_cog(GiveawaySystem(bot))
