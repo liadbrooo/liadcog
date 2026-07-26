@@ -21,7 +21,6 @@ class GiveawaySystem(commands.Cog):
         self.giveaway_task.cancel()
 
     async def giveaway_looper(self):
-        """Background task der prüft ob Giveaways abgelaufen sind."""
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
             try:
@@ -64,6 +63,8 @@ class GiveawaySystem(commands.Cog):
             button = discord.ui.Button(style=discord.ButtonStyle.danger, label=f"Beendet • {participant_count} Teilnehmer", disabled=True)
         else:
             label = f"🎉 Mitmachen! ({participant_count} Teilnehmer)"
+            if required_role_id:
+                label = f"🎉 Mitmachen! ({participant_count} Teilnehmer) [Rolle nötig]"
             button = discord.ui.Button(style=discord.ButtonStyle.success, label=label, custom_id="giveaway_join")
             button.callback = self.button_callback
         view.add_item(button)
@@ -73,7 +74,7 @@ class GiveawaySystem(commands.Cog):
         end_time = datetime.fromisoformat(gw_data["end_time"])
         unix_timestamp = int(end_time.timestamp())
         host = guild.get_member(gw_data["host_id"])
-        host_mention = host.mention if host else f"User ID: {gw_data['host_id']}"
+        host_mention = host.mention if host else f"<@{gw_data['host_id']}>"
 
         req_role_text = "Keine"
         if gw_data.get("required_role_id"):
@@ -149,15 +150,41 @@ class GiveawaySystem(commands.Cog):
         def check(m):
             return m.author == ctx.author and m.channel == ctx.channel
         
-        # 1. Preis
-        await ctx.send("🎉 **Giveaway Setup gestartet!**\nWie soll der **Preis** lauten? (Abbruch mit `cancel`)")
+        # 1. Channel
+        await ctx.send("📢 In welchen **Channel** soll das Giveaway? (Erwähne den #channel, oder schreibe `hier` für diesen Channel)")
+        try:
+            ch_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
+            if ch_msg.content.lower() == "cancel": return await ctx.send("❌ Abgebrochen.")
+            if ch_msg.content.lower() == "hier":
+                target_channel = ctx.channel
+            elif ch_msg.channel_mentions:
+                target_channel = ch_msg.channel_mentions[0]
+            else:
+                return await ctx.send("❌ Kein gültiger Channel. Setup abgebrochen.")
+        except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
+
+        # 2. Host / Veranstalter
+        await ctx.send("👑 Wer **veranstaltet** das Giveaway? (Erwähne den User, oder schreibe `ich`)")
+        try:
+            host_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
+            if host_msg.content.lower() == "cancel": return await ctx.send("❌ Abgebrochen.")
+            if host_msg.content.lower() == "ich":
+                host_id = ctx.author.id
+            elif host_msg.mentions:
+                host_id = host_msg.mentions[0].id
+            else:
+                return await ctx.send("❌ Kein User erwähnt. Setup abgebrochen.")
+        except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
+
+        # 3. Preis
+        await ctx.send("🎁 Wie soll der **Preis** lauten? (Abbruch mit `cancel`)")
         try:
             prize_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
             if prize_msg.content.lower() == "cancel": return await ctx.send("❌ Abgebrochen.")
             prize = prize_msg.content
         except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
 
-        # 2. Zeit
+        # 4. Zeit
         await ctx.send("⏳ Wie lange soll es laufen? (z.B. `1d`, `12h`, `30m`)")
         try:
             time_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
@@ -166,7 +193,7 @@ class GiveawaySystem(commands.Cog):
             if not delta: return await ctx.send("❌ Ungültiges Zeitformat. Setup abgebrochen.")
         except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
 
-        # 3. Gewinner
+        # 5. Gewinner
         await ctx.send("🏆 Wie viele **Gewinner**? (Nur Zahlen)")
         try:
             winners_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
@@ -176,7 +203,7 @@ class GiveawaySystem(commands.Cog):
         except ValueError: return await ctx.send("❌ Das war keine Zahl. Setup abgebrochen.")
         except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
 
-        # 4. Whitelist (Rolle)
+        # 6. Whitelist (Rolle)
         await ctx.send("✅ Welche **Rolle** wird benötigt? (Erwähne Rolle, oder schreibe `keine`)")
         try:
             role_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
@@ -187,7 +214,7 @@ class GiveawaySystem(commands.Cog):
                 required_role_id = role_msg.role_mentions[0].id
         except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
 
-        # 5. Bonus Rolle (2x Chance)
+        # 7. Bonus Rolle (2x Chance)
         await ctx.send("⭐ Gibt es eine **Bonus-Rolle** für doppelte Gewinnchance? (Erwähne Rolle, oder `keine`)")
         try:
             bonus_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
@@ -198,7 +225,7 @@ class GiveawaySystem(commands.Cog):
                 bonus_role_id = bonus_msg.role_mentions[0].id
         except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
 
-        # 6. Blacklist
+        # 8. Blacklist
         await ctx.send("🚫 **Rollen/User ausschließen**? (Erwähne sie, oder `keine`)")
         try:
             bl_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
@@ -207,7 +234,7 @@ class GiveawaySystem(commands.Cog):
             bl_users = [u.id for u in bl_msg.mentions]
         except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
 
-        # 7. Sponsor
+        # 9. Sponsor
         await ctx.send("🤝 Gibt es einen **Sponsor**? (Erwähne User/Rolle oder schreibe Text, oder `keiner`)")
         try:
             s_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
@@ -215,21 +242,21 @@ class GiveawaySystem(commands.Cog):
             sponsor = s_msg.content if s_msg.content.lower() != "keiner" else None
         except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
 
-        # 8. Bild URL
+        # 10. Bild URL
         await ctx.send("🖼️ Soll ein **Bild** ans Embed angehängt werden? (Sende einen Bild-Link, oder `nein`)")
         try:
             img_msg = await self.bot.wait_for('message', timeout=60.0, check=check)
             if img_msg.content.lower() == "cancel": return await ctx.send("❌ Abgebrochen.")
-            image_url = img_msg.content if img_msg.content.lower() != "nein" and img_msg.attachments == [] else None
-            if img_msg.attachments:
-                image_url = img_msg.attachments[0].url
+            image_url = None
+            if img_msg.content.lower() != "nein":
+                image_url = img_msg.content if not img_msg.attachments else img_msg.attachments[0].url
         except asyncio.TimeoutError: return await ctx.send("❌ Zeit abgelaufen. Setup abgebrochen.")
 
         # Vorschau generieren
         end_time = datetime.now(timezone.utc) + delta
         gw_data = {
             "prize": prize, "winners_count": winners_count, "end_time": end_time.isoformat(),
-            "host_id": ctx.author.id, "channel_id": ctx.channel.id, "message_id": 9999, # Platzhalter
+            "host_id": host_id, "channel_id": target_channel.id, "message_id": 9999, # Platzhalter für Vorschau
             "winners": [], "participants": [], "required_role_id": required_role_id,
             "bonus_role_id": bonus_role_id, "blacklisted_roles": bl_roles, "blacklisted_users": bl_users,
             "sponsor": sponsor, "image_url": image_url, "ended": False
@@ -245,8 +272,12 @@ class GiveawaySystem(commands.Cog):
                 return await interaction.response.send_message("Nur der Ersteller kann das bestätigen.", ephemeral=True)
             
             real_view = self.get_giveaway_view(0, required_role_id=required_role_id)
-            real_msg = await ctx.send(embed=embed, view=real_view)
+            real_msg = await target_channel.send(embed=embed, view=real_view)
+            
+            # WICHTIG: ID aktualisieren, damit sie im finalen Embed nicht 9999 ist
             gw_data["message_id"] = real_msg.id
+            final_embed = await self.create_giveaway_embed(ctx.guild, gw_data)
+            await real_msg.edit(embed=final_embed)
             
             async with self.config.guild(ctx.guild).giveaways() as giveaways:
                 giveaways[str(real_msg.id)] = gw_data
@@ -286,17 +317,14 @@ class GiveawaySystem(commands.Cog):
         """Löscht ein Giveaway komplett (ohne Gewinner zu ziehen)."""
         async with self.config.guild(ctx.guild).giveaways() as giveaways:
             if str(message_id) not in giveaways: return await ctx.send("❌ Nicht gefunden.")
-            
             channel_id = giveaways[str(message_id)]["channel_id"]
             del giveaways[str(message_id)]
-            
             channel = ctx.guild.get_channel(channel_id)
             if channel:
                 try:
                     msg = await channel.fetch_message(message_id)
                     await msg.delete()
                 except: pass
-            
             await ctx.send("✅ Giveaway gelöscht.", delete_after=5)
 
     @commands.guild_only()
@@ -307,9 +335,8 @@ class GiveawaySystem(commands.Cog):
         async with self.config.guild(ctx.guild).giveaways() as giveaways:
             active = [gw for gw in giveaways.values() if not gw.get("ended", False)]
             if not active: return await ctx.send("Aktuell gibt es keine laufenden Giveaways.")
-            
             embed = discord.Embed(title="🎉 Aktive Giveaways", color=discord.Color.gold())
-            for gw in active[:10]: # Max 10 anzeigen
+            for gw in active[:10]:
                 end_time = datetime.fromisoformat(gw["end_time"])
                 unix_ts = int(end_time.timestamp())
                 embed.add_field(
@@ -329,11 +356,9 @@ class GiveawaySystem(commands.Cog):
             if str(message_id) not in giveaways: return await ctx.send("❌ Nicht gefunden.")
             gw_data = giveaways[str(message_id)]
             if not gw_data.get("ended"): return await ctx.send("❌ Muss erst beendet sein!")
-            
             participants = gw_data["participants"]
             if not participants: return await ctx.send("❌ Keine Teilnehmer.")
 
-            # Mit Bonus-Logik rerollen
             bonus_role_id = gw_data.get("bonus_role_id")
             pool = []
             for uid in participants:
@@ -349,7 +374,7 @@ class GiveawaySystem(commands.Cog):
                 if not pool: break
                 w = random.choice(pool)
                 new_winners.append(w)
-                pool = [x for x in pool if x != w] # Duplikate des Gewinners entfernen
+                pool = [x for x in pool if x != w]
 
             winner_mentions = ", ".join(f"<@{wid}>" for wid in new_winners)
             try:
@@ -372,22 +397,20 @@ class GiveawaySystem(commands.Cog):
         winners = []
         
         if num_winners > 0:
-            # Bonus Logik für doppelte Chance
             bonus_role_id = gw_data.get("bonus_role_id")
             pool = []
             for uid in participants:
                 member = guild.get_member(uid)
                 if member and bonus_role_id and any(r.id == bonus_role_id for r in member.roles):
-                    pool.extend([uid, uid]) # 2x in den Topf
+                    pool.extend([uid, uid])
                 else:
                     pool.append(uid)
 
-            # Ziehen ohne Duplikate
             for _ in range(num_winners):
                 if not pool: break
                 w = random.choice(pool)
                 winners.append(w)
-                pool = [x for x in pool if x != w] # Alle Instanzen des Gewinners entfernen
+                pool = [x for x in pool if x != w]
 
         gw_data["winners"] = winners
         embed = await self.create_giveaway_embed(guild, gw_data, is_ended=True)
@@ -418,17 +441,20 @@ class GiveawaySystem(commands.Cog):
 
         async with self.config.guild(guild).giveaways() as giveaways:
             msg_id_str = str(interaction.message.id)
-            if msg_id_str not in giveaways: return await interaction.response.send_message("Existiert nicht mehr.", ephemeral=True)
+            if msg_id_str not in giveaways: 
+                return await interaction.response.send_message("Existiert nicht mehr.", ephemeral=True)
+            
             gw = giveaways[msg_id_str]
-            if gw.get("ended"): return await interaction.response.send_message("Bereits beendet!", ephemeral=True)
+            if gw.get("ended"): 
+                return await interaction.response.send_message("Bereits beendet!", ephemeral=True)
 
             member = interaction.user
             user_id = member.id
 
-            # Checks
-            if gw.get("required_role_id"):
-                if not any(r.id == gw_data["required_role_id"] for r in member.roles):
-                    role = guild.get_role(gw["required_role_id"])
+            required_role_id = gw.get("required_role_id")
+            if required_role_id:
+                if not any(r.id == required_role_id for r in member.roles):
+                    role = guild.get_role(required_role_id)
                     return await interaction.response.send_message(f"❌ Du brauchst die Rolle **{role.name if role else 'Unbekannt'}**!", ephemeral=True)
             
             if any(r.id in gw.get("blacklisted_roles", []) for r in member.roles):
@@ -444,14 +470,15 @@ class GiveawaySystem(commands.Cog):
                 joined = True
             
             participant_count = len(gw["participants"])
+            gw_copy = gw.copy()
 
-        embed = await self.create_giveaway_embed(guild, gw)
-        view = self.get_giveaway_view(participant_count, required_role_id=gw.get("required_role_id"))
+        embed = await self.create_giveaway_embed(guild, gw_copy)
+        view = self.get_giveaway_view(participant_count, required_role_id=gw_copy.get("required_role_id"))
         await interaction.response.edit_message(embed=embed, view=view)
         
         if joined:
-            msg = "✅ Du nimmst teil!"
-            if gw.get("bonus_role_id") and any(r.id == gw["bonus_role_id"] for r in member.roles):
+            msg = "✅ Du nimmst erfolgreich am Giveaway teil!"
+            if gw_copy.get("bonus_role_id") and any(r.id == gw_copy["bonus_role_id"] for r in member.roles):
                 msg += " (⭐ Bonus-Chance aktiv!)"
             await interaction.followup.send(msg, ephemeral=True)
         else:
