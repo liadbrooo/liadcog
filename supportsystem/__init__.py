@@ -27,10 +27,52 @@ class SupportSystem(commands.Cog):
             "user_history": {}
         }
         self.config.register_guild(**default_guild)
+        self.cleanup_task = None
 
     async def cog_load(self):
         self.bot.add_view(SupportClaimView(self))
         self.bot.add_view(SupportControlView(self))
+        self.cleanup_task = asyncio.create_task(self.cleanup_orphaned_sessions())
+
+    def cog_unload(self):
+        if self.cleanup_task:
+            self.cleanup_task.cancel()
+
+    async def cleanup_orphaned_sessions(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                all_guilds = await self.config.all_guilds()
+                for guild_id, guild_data in all_guilds.items():
+                    guild = self.bot.get_guild(guild_id)
+                    if not guild: continue
+                    
+                    sessions = guild_data.get("active_sessions", {})
+                    to_end = []
+                    
+                    for session_id, s_data in sessions.items():
+                        if s_data.get("status") in ["active", "paused"]:
+                            channel_id = s_data.get("channel_id")
+                            user_ids = s_data.get("user_ids", [])
+                            if not channel_id or not user_ids:
+                                continue
+                            
+                            channel = guild.get_channel(channel_id)
+                            if not channel:
+                                to_end.append((session_id, "Channel wurde gelöscht"))
+                                continue
+                            
+                            active_users_present = any(m.id in user_ids for m in channel.members)
+                            
+                            if not active_users_present:
+                                to_end.append((session_id, "User nicht mehr im Channel (Auto-Cleanup)"))
+                    
+                    for session_id, reason in to_end:
+                        await self.end_session(guild, session_id, reason)
+            except Exception as e:
+                print(f"SupportSystem Cleanup Error: {e}")
+            
+            await asyncio.sleep(60)
 
     async def is_staff(self, member: discord.Member):
         guild = member.guild
@@ -48,6 +90,17 @@ class SupportSystem(commands.Cog):
     def clean_nick(self, nick: str) -> str:
         if not nick: return ""
         return re.sub(r"^\[\d+\]\s*", "", nick)
+
+    async def _reset_member_nick(self, member: discord.Member, orig_nick: str = None):
+        if not member: return
+        if orig_nick is None or not orig_nick:
+            orig_nick = self.clean_nick(member.nick if member.nick else member.name)
+        
+        try:
+            if member.nick != orig_nick:
+                await member.edit(nick=orig_nick[:32] if orig_nick else None, reason="Support System Reset")
+        except discord.Forbidden: pass
+        except Exception: pass
 
     async def get_mover(self, guild, target_member):
         try:
@@ -84,7 +137,6 @@ class SupportSystem(commands.Cog):
             return
 
         elif before.channel and after.channel and before.channel != after.channel:
-            # FIX: after.channel statt after_channel
             await self.handle_support_leave(member, guild, before.channel)
             await self.handle_support_join(member, guild, after.channel)
             return
@@ -106,6 +158,7 @@ class SupportSystem(commands.Cog):
         blacklist = await self.config.guild(guild).blacklist()
         if member.id in blacklist:
             try:
+                await self._reset_member_nick(member)
                 await member.move_to(None, reason="Support Blacklist")
                 await member.send("Du bist auf der Blacklist für das Support-System.")
             except: pass
@@ -118,6 +171,7 @@ class SupportSystem(commands.Cog):
                 if datetime.datetime.now(datetime.timezone.utc) < end_time:
                     time_left = int((end_time - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
                     try:
+                        await self._reset_member_nick(member)
                         await member.move_to(None, reason="Support Cooldown")
                         await member.send(f"Du musst noch {time_left} Sekunden warten, bevor du wieder Support anfragen kannst.")
                     except: pass
@@ -134,7 +188,8 @@ class SupportSystem(commands.Cog):
             new_nick = f"[{position}] {original_nick}"[:32]
             
             try:
-                await member.edit(nick=new_nick, mute=True, reason="Support Warteraum")
+                if member.nick != new_nick:
+                    await member.edit(nick=new_nick, mute=True, reason="Support Warteraum")
             except discord.Forbidden: pass
 
             staff_channel_id = await self.config.guild(guild).staff_channel()
@@ -183,16 +238,11 @@ class SupportSystem(commands.Cog):
                     break
             
             if not session_id:
-                try:
-                    clean_name = self.clean_nick(member.nick if member.nick else member.name) or member.name
-                    await member.edit(nick=clean_name[:32], mute=False, reason="Warteraum verlassen (Cleanup)")
-                except: pass
+                await self._reset_member_nick(member)
                 return
 
-            orig_nick = sessions[session_id].get("original_nicks", {}).get(str(member.id), member.name)
-            try:
-                await member.edit(nick=orig_nick, mute=False, reason="Warteraum verlassen")
-            except: pass
+            orig_nick = sessions[session_id].get("original_nicks", {}).get(str(member.id), None)
+            await self._reset_member_nick(member, orig_nick)
 
         if after_channel and after_channel.id != await self.config.guild(guild).waitroom():
             claimer_id = await self.get_mover(guild, member)
@@ -200,7 +250,7 @@ class SupportSystem(commands.Cog):
             active_session_id = None
             async with self.config.guild(guild).active_sessions() as sessions:
                 for msg_id, s_data in sessions.items():
-                    if s_data.get("status") == "active" and s_data.get("channel_id") == after_channel.id:
+                    if s_data.get("status") in ["active", "paused"] and s_data.get("channel_id") == after_channel.id:
                         active_session_id = msg_id
                         break
             
@@ -252,12 +302,8 @@ class SupportSystem(commands.Cog):
             session = sessions[session_id]
             
             if member.id in session["user_ids"]:
-                try: 
-                    orig_nick = session["original_nicks"].get(str(member.id), member.name)
-                    await member.edit(mute=False, nick=orig_nick, reason="Support verlassen")
-                except: pass
-
-                # FIX: Sobald der Support-User weg ist, wird der Fall IMMER beendet. Kein Zusammenführen mehr.
+                orig_nick = session["original_nicks"].get(str(member.id), None)
+                await self._reset_member_nick(member, orig_nick)
                 needs_end = True
                     
             elif member.id in session["staff_ids"]:
@@ -302,18 +348,14 @@ class SupportSystem(commands.Cog):
                 if waiting_session_id in sessions:
                     waiting_session = sessions.pop(waiting_session_id)
                     session["user_ids"].append(member.id)
-                    session["original_nicks"][str(member.id)] = waiting_session["original_nicks"].get(str(member.id), member.name)
+                    orig_nick = waiting_session["original_nicks"].get(str(member.id), None)
+                    session["original_nicks"][str(member.id)] = orig_nick
                     
-                    try: 
-                        orig = session["original_nicks"].get(str(member.id), member.name)
-                        await member.edit(mute=False, nick=orig, reason="Support zusammengelegt")
-                    except: pass
+                    await self._reset_member_nick(member, orig_nick)
                     
                     do_update = True
                     update_title = "Support zusammengelegt"
                     update_desc = f"{member.mention} wurde dem Supportfall hinzugefügt."
-            
-            # FIX: Komplett entfernt, dass User aus anderen Channels automatisch in den Support gemerged werden.
                 
         if do_update:
             if waiting_session_id:
@@ -352,7 +394,6 @@ class SupportSystem(commands.Cog):
                 else:
                     claimer_str = f"<@{claimer_id}>"
             
-            # Fallback: Teamler im Channel scannen
             for m in channel.members:
                 if await self.is_staff(m) and m.id not in session["staff_ids"]:
                     session["staff_ids"].append(m.id)
@@ -463,17 +504,16 @@ class SupportSystem(commands.Cog):
 
             del sessions[session_id]
         
-        if channel_id:
-            channel = guild.get_channel(channel_id)
-            if channel:
-                for u_id in user_ids_to_kick:
-                    m = guild.get_member(u_id)
-                    if m and m.voice and m.voice.channel and m.voice.channel.id == channel.id:
-                        try: 
-                            orig_nick = original_nicks.get(str(m.id), m.name)
-                            await m.edit(mute=False, nick=orig_nick, reason="Support beendet")
-                            await m.move_to(None, reason="Support beendet")
-                        except: pass
+        for u_id in user_ids_to_kick:
+            m = guild.get_member(u_id)
+            if m:
+                orig_nick = original_nicks.get(str(m.id), None)
+                await self._reset_member_nick(m, orig_nick)
+                if m.voice and m.voice.channel and channel_id and m.voice.channel.id == channel_id:
+                    try:
+                        await m.edit(mute=False, reason="Support beendet")
+                        await m.move_to(None, reason="Support beendet")
+                    except: pass
         
         wait_dur = self.format_timedelta(s_start - start_time)
         supp_dur = self.format_timedelta(end_time - s_start)
@@ -588,18 +628,88 @@ class SupportSystem(commands.Cog):
 
     @lsupportsetup.command(name="lclearsessions")
     async def lclearsessions(self, ctx: commands.Context):
-        """NOTFALL: Setzt alle aktiven Support-Sessions zurück und löscht die Warteschlange."""
+        """NOTFALL: Setzt alle Support-Sessions zurück, löscht Warteschlange und reinigt alle Nicknames."""
         await self.config.guild(ctx.guild).active_sessions.set({})
         await self.config.guild(ctx.guild).cooldowns.set({})
-        await ctx.send("✅ Alle aktiven Support-Sessions und Cooldowns wurden zurückgesetzt.")
         
+        cleaned_count = 0
         for vc in ctx.guild.voice_channels:
             for m in vc.members:
-                try:
-                    if m.nick and m.nick.startswith("[") and "]" in m.nick:
-                        clean_nick = self.clean_nick(m.nick) or m.name
-                        await m.edit(mute=False, nick=clean_nick[:32] if clean_nick != m.name else None, reason="Sessions zurückgesetzt")
-                except: pass
+                if m.nick and m.nick.startswith("[") and "]" in m.nick:
+                    await self._reset_member_nick(m)
+                    cleaned_count += 1
+                    try: await m.edit(mute=False, reason="Sessions zurückgesetzt")
+                    except: pass
+                        
+        await ctx.send(f"✅ Alle Support-Sessions zurückgesetzt. {cleaned_count} Nicknames wurden gereinigt.")
+
+    # --- OWNER / ADMIN BEFEHLE ---
+
+    @lsupportsetup.command(name="lsettings")
+    async def lsettings(self, ctx: commands.Context):
+        """Zeigt alle aktuellen Einstellungen des Support-Systems an."""
+        data = await self.config.guild(ctx.guild).all()
+        
+        waitroom = ctx.guild.get_channel(data.get("waitroom")) if data.get("waitroom") else None
+        staff_c = ctx.guild.get_channel(data.get("staff_channel")) if data.get("staff_channel") else None
+        log_c = ctx.guild.get_channel(data.get("log_channel")) if data.get("log_channel") else None
+        staff_r = ctx.guild.get_role(data.get("staff_role")) if data.get("staff_role") else None
+        extra_rs = [ctx.guild.get_role(r).mention for r in data.get("extra_staff_roles", []) if ctx.guild.get_role(r)]
+        
+        embed = discord.Embed(title="⚙️ Support System Einstellungen", color=discord.Color.dark_blue(), timestamp=datetime.datetime.now(datetime.timezone.utc))
+        
+        embed.add_field(name="🔊 Warteraum", value=waitroom.mention if waitroom else "❌ Nicht gesetzt", inline=False)
+        embed.add_field(name="📋 Staff-Channel", value=staff_c.mention if staff_c else "❌ Nicht gesetzt", inline=False)
+        embed.add_field(name="📡 Log-Channel", value=log_c.mention if log_c else "❌ Nicht gesetzt", inline=False)
+        embed.add_field(name="👑 Haupt-Support-Rolle", value=staff_r.mention if staff_r else "❌ Nicht gesetzt", inline=False)
+        embed.add_field(name="👥 Zusatz-Rollen (ohne Ping)", value=", ".join(extra_rs) if extra_rs else "Keine gesetzt", inline=False)
+        embed.add_field(name="⏱️ Cooldown", value=f"{data.get('cooldown', 300)} Sekunden", inline=False)
+        
+        await ctx.send(embed=embed)
+
+    @lsupportsetup.command(name="lforceclose")
+    async def lforceclose(self, ctx: commands.Context, member: discord.Member):
+        """Zwingt einen User sofort aus dem Support/Warteraum (Notfall-Kick)."""
+        sessions = await self.config.guild(ctx.guild).active_sessions()
+        session_id_to_close = None
+        
+        for msg_id, s_data in sessions.items():
+            if member.id in s_data.get("user_ids", []):
+                session_id_to_close = msg_id
+                break
+                
+        if not session_id_to_close:
+            return await ctx.send(f"❌ {member.mention} befindet sich in keinem aktiven oder wartenden Supportfall.")
+            
+        await ctx.send(f"🔧 Schließe Supportfall für {member.mention} erzwungen...")
+        success = await self.end_session(ctx.guild, session_id_to_close, "Von Admin zwangsgeschlossen")
+        
+        if success:
+            await ctx.send(f"✅ Supportfall für {member.mention} wurde erfolgreich zwangsgeschlossen.")
+        else:
+            await ctx.send(f"⚠️ Konnte den Supportfall nicht beenden (evtl. schon beendet).")
+
+    @lsupportsetup.command(name="lresetstats")
+    async def lresetstats(self, ctx: commands.Context):
+        """Setzt die Support-Statistiken aller Teamler zurück (z.B. für den Monatswechsel)."""
+        await self.config.guild(ctx.guild).stats.set({})
+        await ctx.send("✅ Alle Support-Statistiken wurden zurückgesetzt.")
+
+    @lsupportsetup.command(name="lfixnicks")
+    async def lfixnicks(self, ctx: commands.Context):
+        """Reinigt alle Voice-Channels nach hängengebliebenen Wartenummern."""
+        cleaned_count = 0
+        for vc in ctx.guild.voice_channels:
+            for m in vc.members:
+                if m.nick and m.nick.startswith("[") and "]" in m.nick:
+                    await self._reset_member_nick(m)
+                    cleaned_count += 1
+                    try: await m.edit(mute=False, reason="Nickname Fix (Admin)")
+                    except: pass
+                        
+        await ctx.send(f"✅ Globaler Cleanup beendet. {cleaned_count} Nicknames wurden repariert.")
+
+    # --- USER BEFEHLE ---
 
     @commands.command(name="lsupportstats")
     @commands.mod_or_permissions(manage_messages=True)
@@ -759,8 +869,9 @@ class SupportClaimView(discord.ui.View):
             if member and member.voice:
                 try:
                     await member.move_to(target_channel, reason="Support übernommen")
-                    orig_nick = sessions[session_id].get("original_nicks", {}).get(str(member.id), member.name)
-                    await member.edit(mute=False, nick=orig_nick, reason="Support übernommen")
+                    orig_nick = sessions[session_id].get("original_nicks", {}).get(str(member.id), None)
+                    await self.cog._reset_member_nick(member, orig_nick)
+                    await member.edit(mute=False, reason="Support übernommen")
                     moved_any = True
                 except: pass
                     
