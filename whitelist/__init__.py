@@ -18,25 +18,25 @@ class FiveMWhitelist(commands.Cog):
         bot.add_view(WhitelistButtonView(self.config))
         bot.add_view(ApplicationActionsView(self.config))
 
-    @commands.group(name="whitelist", aliases=["wl"])
+    @commands.group(name="lwhitelist")
     @commands.admin_or_permissions(manage_guild=True)
-    async def whitelist_group(self, ctx: commands.Context):
+    async def lwhitelist_group(self, ctx: commands.Context):
         """Einstellungen für das FiveM Whitelist System."""
         pass
 
-    @whitelist_group.command(name="setchannel")
+    @lwhitelist_group.command(name="setchannel")
     async def set_log_channel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Setzt den Channel, in dem die Bewerbungen an das Team gesendet werden."""
         await self.config.guild(ctx.guild).log_channel.set(channel.id)
         await ctx.send(f"✅ Bewerbungs-Channel wurde auf {channel.mention} gesetzt.")
 
-    @whitelist_group.command(name="setrole")
+    @lwhitelist_group.command(name="setrole")
     async def set_wl_role(self, ctx: commands.Context, role: discord.Role):
         """Setzt die Rolle, die User bei Annahme erhalten."""
         await self.config.guild(ctx.guild).wl_role.set(role.id)
         await ctx.send(f"✅ Whitelist-Rolle wurde auf {role.mention} gesetzt.")
 
-    @whitelist_group.command(name="setup")
+    @lwhitelist_group.command(name="setup")
     async def setup_panel(self, ctx: commands.Context):
         """Sendet das Panel, auf das User klicken können, um das Formular zu öffnen."""
         embed = discord.Embed(
