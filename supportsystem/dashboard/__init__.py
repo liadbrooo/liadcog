@@ -8,23 +8,20 @@ from flask import render_template_string, request, flash, redirect
 async def supportsystem_settings(user: discord.User, guild: discord.Guild):
     """Die Custom-Einstellungsseite für das Support-System im Red Dashboard."""
     
-    # Bot und Cog abrufen
     bot = dashboard.bot
     cog = bot.get_cog("SupportSystem")
     if not cog:
-        return "SupportSystem Cog ist nicht geladen.", 500
+        return render_template_string("<h1>SupportSystem Cog ist nicht geladen.</h1>")
 
     config = cog.config.guild(guild)
 
     if request.method == "POST":
-        # Daten aus dem Web-Formular auslesen
         waitroom_id = request.form.get("waitroom", type=int)
         staff_channel_id = request.form.get("staff_channel", type=int)
         staff_role_id = request.form.get("staff_role", type=int)
         log_channel_id = request.form.get("log_channel", type=int)
         cooldown = request.form.get("cooldown", type=int, default=300)
 
-        # Speichern in der RedBot Config
         if waitroom_id: await config.waitroom.set(waitroom_id)
         if staff_channel_id: await config.staff_channel.set(staff_channel_id)
         if staff_role_id: await config.staff_role.set(staff_role_id)
@@ -34,14 +31,12 @@ async def supportsystem_settings(user: discord.User, guild: discord.Guild):
         flash("✅ Support-System Einstellungen erfolgreich gespeichert!", "success")
         return redirect(request.url)
 
-    # Aktuelle Daten für die Anzeige laden
     waitroom_id = await config.waitroom()
     staff_channel_id = await config.staff_channel()
     staff_role_id = await config.staff_role()
     log_channel_id = await config.log_channel()
     cooldown = await config.cooldown()
 
-    # Das HTML Template für das Dashboard
     html = """
     {% extends "base.html" %}
     {% block content %}
