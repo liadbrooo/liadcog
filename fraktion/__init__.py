@@ -18,7 +18,8 @@ class Fraktion(commands.Cog):
             "legal_board_channel": None,
             "illegal_board_channel": None,
             "changelog_channel": None,
-            "warn_log_channel": None
+            "warn_log_channel": None,
+            "warn_roles": [] # Neue Einstellung: Rollen-IDs, die Verwarnungen geben dürfen
         }
         default_user = {
             "blacklists": []
@@ -35,9 +36,8 @@ class Fraktion(commands.Cog):
             from zoneinfo import ZoneInfo
             return datetime.now(ZoneInfo("Europe/Berlin"))
         except Exception:
-            # Fallback falls Python veraltet ist
-            from datetime import timezone, timedelta
-            return datetime.now(timezone(timedelta(hours=2))) # Vereinfachter Fallback
+            from datetime import timezone
+            return datetime.now(timezone(timedelta(hours=2))) # Fallback
 
     def is_faction_leader(self, user: discord.User, faction_data: dict) -> bool:
         guild = self.bot.get_guild(faction_data.get("guild_id", 0))
@@ -65,6 +65,27 @@ class Fraktion(commands.Cog):
         
         berlin_now = self.get_berlin_time()
         return berlin_now + delta
+
+    # --- CUSTOM CHECKS ---
+
+    def is_warn_authorized():
+        """Custom Check: Prüft, ob ein User Verwarnungen aussprechen darf."""
+        async def predicate(ctx):
+            # Admins dürfen immer
+            if ctx.author.guild_permissions.manage_guild:
+                return True
+            
+            # Konfigurierte Rollen prüfen
+            authorized_roles = await ctx.cog.config.warn_roles()
+            if authorized_roles:
+                if any(role.id in authorized_roles for role in ctx.author.roles):
+                    return True
+                return False
+            
+            # Fallback, wenn keine Rollen eingestellt sind: Nachrichten verwalten
+            return ctx.author.guild_permissions.manage_messages
+            
+        return commands.check(predicate)
 
     # --- EINSTELLUNGEN ---
 
@@ -100,6 +121,21 @@ class Fraktion(commands.Cog):
         """Setzt den Channel, in dem alle Verwarnungen protokolliert werden."""
         await self.config.warn_log_channel.set(channel.id)
         await ctx.send(f"✅ Der Warn-Log-Channel wurde auf {channel.mention} gesetzt.")
+
+    @faction_setup.command(name="warnroles", aliases=["warnrollen"])
+    async def setup_warnroles(self, ctx, *, roles: commands.Greedy[discord.Role]):
+        """Legt die Rollen fest, die Fraktionsverwarnungen aussprechen dürfen.
+        
+        Beispiel: [p]fk setup warnroles @Support @Leitung 123456789
+        (Lass die Rollen weg, um die Liste zu leeren.)
+        """
+        if not roles:
+            await self.config.warn_roles.set([])
+            return await ctx.send("✅ Die autorisierten Rollen wurden zurückgesetzt. Ab sofort greift wieder die Standard-Berechtigung (Nachrichten verwalten).")
+            
+        role_ids = [r.id for r in roles]
+        await self.config.warn_roles.set(role_ids)
+        await ctx.send(f"✅ Folgende Rollen dürfen ab sofort Fraktionsverwarnungen aussprechen:\n{', '.join(r.mention for r in roles)}")
 
     # --- FRAKTIONSVERWALTUNG ---
 
@@ -179,7 +215,7 @@ class Fraktion(commands.Cog):
     # --- VERWARNUNGEN (STRIKES) ---
 
     @faction_group.command(name="warn", aliases=["verwarnung"])
-    @commands.admin_or_permissions(manage_messages=True)
+    @is_warn_authorized()
     async def faction_warn(self, ctx, faction: str, *, reason_text: str):
         """Gibt einer Fraktion eine Verwarnung. Dauer ist optional (Standard: perm)."""
         try:
@@ -277,7 +313,6 @@ class Fraktion(commands.Cog):
                         pass
 
         except Exception as e:
-            # Falls immer noch ein Fehler auftritt, schicken wir ihn direkt in den Discord!
             error_msg = f"```py\n{traceback.format_exc()}\n```"
             if len(error_msg) > 1900:
                 error_msg = error_msg[-1900:]
