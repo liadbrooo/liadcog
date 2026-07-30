@@ -21,23 +21,32 @@ class FiveMWhitelist(commands.Cog):
         bot.add_view(WhitelistButtonView(self.config))
         bot.add_view(ApplicationActionsView(self.config))
 
-    # Hilfsfunktion für Berechtigungsprüfung
+    # --- REPARIERTE BERECHTIGUNGS-PRÜFUNG ---
     async def check_perms(self, ctx_or_interaction) -> bool:
-        if hasattr(ctx_or_interaction, 'guild_permissions'): # Context
+        user = None
+        guild = None
+        
+        # Fall 1: Es ist ein normaler Befehl (Context)
+        if isinstance(ctx_or_interaction, commands.Context):
             user = ctx_or_interaction.author
             guild = ctx_or_interaction.guild
             if user.guild_permissions.manage_guild:
                 return True
-        else: # Interaction
+        # Fall 2: Es ist ein Button-Klick (Interaction)
+        elif isinstance(ctx_or_interaction, discord.Interaction):
             user = ctx_or_interaction.user
             guild = ctx_or_interaction.guild
             if user.guild_permissions.manage_roles:
                 return True
+        else:
+            return False
 
+        # Ping Rolle prüfen
         ping_role_id = await self.config.guild(guild).ping_role()
         if ping_role_id and guild.get_role(ping_role_id) in user.roles:
             return True
             
+        # Extra Rollen prüfen
         extra_roles = await self.config.guild(guild).extra_wl_roles()
         for role_id in extra_roles:
             if guild.get_role(role_id) in user.roles:
@@ -51,7 +60,7 @@ class FiveMWhitelist(commands.Cog):
         """Einstellungen für das FiveM Whitelist System."""
         pass
 
-    # --- NEUE MANUELLE BEFEHLE ---
+    # --- MANUELLE BEFEHLE ---
 
     @commands.command(name="lw")
     async def manual_add_wl(self, ctx: commands.Context, user_id: int):
@@ -251,7 +260,7 @@ class WhitelistButtonView(discord.ui.View):
         super().__init__(timeout=None)
         self.config = config
 
-    @discord.ui.button(label="Bewerbung starten", style=discord.ButtonStyle.primary, custom_id="fivem_wl_start_v7", emoji="📝")
+    @discord.ui.button(label="Bewerbung starten", style=discord.ButtonStyle.primary, custom_id="fivem_wl_start_v8", emoji="📝")
     async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         wl_role_id = await self.config.guild(interaction.guild).wl_role()
         if wl_role_id:
@@ -344,7 +353,6 @@ class ApplicationActionsView(discord.ui.View):
     def __init__(self, config: Config):
         super().__init__(timeout=None)
         self.config = config
-        self.cog_ref = None # Placeholder, we use static method via cog instance check
 
     async def get_applicant(self, interaction: discord.Interaction):
         match = re.search(r"`(\d+)`", interaction.message.embeds[0].description)
@@ -368,7 +376,7 @@ class ApplicationActionsView(discord.ui.View):
                 
         return False
 
-    @discord.ui.button(label="Annehmen", style=discord.ButtonStyle.success, custom_id="fivem_wl_accept_v7", emoji="✅")
+    @discord.ui.button(label="Annehmen", style=discord.ButtonStyle.success, custom_id="fivem_wl_accept_v8", emoji="✅")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -401,7 +409,7 @@ class ApplicationActionsView(discord.ui.View):
         if dm_failed:
             await interaction.followup.send("⚠️ Der User wurde angenommen, hat aber seine **DMs gesperrt**! Bitte informiere ihn manuell.", ephemeral=True)
 
-    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="fivem_wl_reject_v7", emoji="❌")
+    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="fivem_wl_reject_v8", emoji="❌")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -413,7 +421,7 @@ class ApplicationActionsView(discord.ui.View):
         modal = RejectReasonModal(applicant, interaction.message, interaction.guild.name, interaction.user)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Rückfragen", style=discord.ButtonStyle.secondary, custom_id="fivem_wl_questions_v7", emoji="❓")
+    @discord.ui.button(label="Rückfragen", style=discord.ButtonStyle.secondary, custom_id="fivem_wl_questions_v8", emoji="❓")
     async def questions(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -429,7 +437,6 @@ class ApplicationActionsView(discord.ui.View):
                 f"Bitte komm in den Support-Warteraum oder eröffne ein Allgemeines-Ticket."
             )
         except discord.Forbidden:
-            # Wenn DMs gesperrt sind, Buttons NICHT entfernen, damit es das Team nochmal versuchen kann oder manuell anschreibt
             return await interaction.response.send_message("⚠️ Dieser User hat seine **DMs gesperrt**! Ich konnte ihn nicht anschreiben. Bitte kontaktiere ihn anderweitig (z.B. über einen öffentlichen Channel).", ephemeral=True)
 
         embed = interaction.message.embeds[0]
@@ -437,7 +444,12 @@ class ApplicationActionsView(discord.ui.View):
         embed.title = "❓ Rückfragen gestellt"
         embed.add_field(name="⚙️ Admin-Aktion", value=f"Rückfragen gestellt von: {interaction.user.mention}", inline=False)
         
-        await interaction.response.edit_message(content=f"🔔 Rückfragen von {interaction.user.mention}", embed=embed, view=None)
+        # Nur den Rückfragen-Button deaktivieren, die anderen aktiv lassen
+        for child in self.children:
+            if child.custom_id == "fivem_wl_questions_v8":
+                child.disabled = True
+        
+        await interaction.response.edit_message(content=f"🔔 Rückfragen von {interaction.user.mention}", embed=embed, view=self)
 
 
 class RejectReasonModal(discord.ui.Modal, title="Grund für Ablehnung"):
