@@ -38,12 +38,12 @@ class Fraktion(commands.Cog):
         return any(role.id in faction_data["leader_role_ids"] for role in member.roles)
 
     def parse_duration(self, duration_str: str):
-        """Parst Zeiträume wie 7d, 12h, 30m. Gibt ein datetime Objekt oder None zurück."""
+        """Parst Zeiträume wie 7d, 12h, 30m. Gibt ein datetime Objekt oder None (für perm) zurück. False bei ungültig."""
         if duration_str.lower() in ["perm", "permanent", "0"]:
             return None
         match = re.match(r"(\d+)([dhmw])", duration_str.lower())
         if not match:
-            return False # False bedeutet: ungültiges Format
+            return False 
         amount = int(match.group(1))
         unit = match.group(2)
         if unit == "m": delta = timedelta(minutes=amount)
@@ -139,7 +139,6 @@ class Fraktion(commands.Cog):
             msg += f"{emoji} **{data['display_name']}**\n"
             
             if guild:
-                # Leiter finden
                 leaders = []
                 leader_role_names = []
                 for member in guild.members:
@@ -166,13 +165,12 @@ class Fraktion(commands.Cog):
 
     @faction_group.command(name="warn", aliases=["verwarnung"])
     @commands.admin_or_permissions(manage_messages=True)
-    async def faction_warn(self, ctx, faction: str, duration: str = "perm", *, reason: str):
-        """Gibt einer Fraktion eine Verwarnung.
+    async def faction_warn(self, ctx, faction: str, *, reason_text: str):
+        """Gibt einer Fraktion eine Verwarnung. Dauer ist optional (Standard: perm).
         
-        Args:
-            faction: Name der Fraktion
-            duration: Dauer der Verwarnung (z.B. 7d, 12h, 30m). "perm" für permanent.
-            reason: Grund der Verwarnung.
+        Beispiele:
+            [p]fk warn LSPD FailRP beim Bankraub  (Permanent)
+            [p]fk warn LSPD 7d FailRP beim Bankraub (7 Tage)
         """
         factions = await self.config.factions()
         if faction.lower() not in factions:
@@ -180,10 +178,22 @@ class Fraktion(commands.Cog):
             
         faction_data = factions[faction.lower()]
         
-        # Zeit parsen
+        # Smartes Parsen: Prüft, ob das erste Wort eine Zeitdauer ist
+        parts = reason_text.split()
+        duration = "perm"
+        reason = reason_text
+        
+        if len(parts) > 1:
+            test_dur = self.parse_duration(parts[0])
+            if test_dur is not False: # Wenn es eine gültige Zeitdauer ist (oder 'perm')
+                duration = parts[0]
+                reason = " ".join(parts[1:])
+                
+        if not reason:
+            return await ctx.send("❌ Du musst einen Grund angeben.")
+            
         expires_at = self.parse_duration(duration)
-        if expires_at is False:
-            return await ctx.send("❌ Ungültiges Zeitformat. Nutze z.B. `7d` (Tage), `12h` (Stunden), `30m` (Minuten) oder `perm`.")
+        # Da wir oben schon validiert haben, ist expires_at hier niemals False
             
         warning_id = str(uuid.uuid4())[:8]
         current_time = datetime.now()
@@ -198,16 +208,25 @@ class Fraktion(commands.Cog):
                 if any(role.id in faction_data["leader_role_ids"] for role in member.roles):
                     notified_leaders.append(member.mention)
                     try:
-                        dm_embed = discord.Embed(title=f"⚠️ Fraktionsverwarnung für {faction_data['display_name']}", color=discord.Color.red())
-                        dm_embed.add_field(name="Grund", value=reason, inline=False)
-                        dm_embed.add_field(name="Dauer", value=expires_str, inline=False)
-                        dm_embed.set_footer(text=f"Ausgestellt von {ctx.author.name} am {current_time_str}")
+                        # Verschönerte DM
+                        dm_embed = discord.Embed(
+                            title="⚠️ Amtliche Fraktionsverwarnung",
+                            description=f"Eure Fraktion **{faction_data['display_name']}** hat eine Verwarnung erhalten.",
+                            color=discord.Color.red()
+                        )
+                        dm_embed.add_field(name="🆔 Verwarnungs-ID", value=f"`{warning_id}`", inline=True)
+                        dm_embed.add_field(name="⏳ Dauer", value=f"`{expires_str}`", inline=True)
+                        dm_embed.add_field(name="📝 Begründung", value=reason, inline=False)
+                        dm_embed.set_footer(text=f"Ausgestellt durch: {ctx.author.name} • {current_time_str}")
                         await member.send(embed=dm_embed)
                     except discord.Forbidden:
                         pass
         
-        # Warn in DB speichern
+        # Warn in DB speichern (MIT KEYERROR SCHUTZ)
         async with self.config.factions() as f:
+            if "warnings" not in f[faction.lower()]:
+                f[faction.lower()]["warnings"] = []
+                
             f[faction.lower()]["warnings"].append({
                 "id": warning_id, 
                 "reason": reason, 
@@ -217,7 +236,7 @@ class Fraktion(commands.Cog):
             })
             
         # Embed für den Ausführer
-        embed = discord.Embed(title="⚠️ Fraktionsverwarnung ausgesprochen", color=discord.Color.red())
+        embed = discord.Embed(title="⚠️ Verwarnung ausgesprochen", color=discord.Color.red(), timestamp=current_time)
         embed.add_field(name="Fraktion", value=faction_data["display_name"], inline=True)
         embed.add_field(name="Warn-ID", value=warning_id, inline=True)
         embed.add_field(name="Dauer", value=expires_str, inline=True)
@@ -239,7 +258,7 @@ class Fraktion(commands.Cog):
                 log_embed.add_field(name="Warn-ID", value=warning_id, inline=True)
                 log_embed.add_field(name="Dauer", value=expires_str, inline=True)
                 log_embed.add_field(name="Grund", value=reason, inline=False)
-                log_embed.set_footer(text=f"Ausgestellt von {ctx.author.name}") # HIER WAR DER FEHLER
+                log_embed.set_footer(text=f"Ausgestellt von {ctx.author.name}")
                 try:
                     await log_channel.send(embed=log_embed)
                 except:
@@ -261,12 +280,12 @@ class Fraktion(commands.Cog):
         
         now = datetime.now().timestamp()
         for w in warnings:
-            status = "**[ABGELAUFEN]**" if w["expires"] and w["expires"] < now else "**[AKTIV]**"
-            expires_str = datetime.fromtimestamp(w["expires"]).strftime("%d.%m.%Y %H:%M") if w["expires"] else "Permanent"
+            status = "**[ABGELAUFEN]**" if w.get("expires") and w["expires"] < now else "**[AKTIV]**"
+            expires_str = datetime.fromtimestamp(w["expires"]).strftime("%d.%m.%Y %H:%M") if w.get("expires") else "Permanent"
             
             msg += f"{status} **ID:** `{w['id']}`\n"
             msg += f"**Grund:** {w['reason']}\n"
-            msg += f"**Dauer:** Läuft ab am {expires_str}\n" if w["expires"] else "**Dauer:** Permanent\n"
+            msg += f"**Dauer:** Läuft ab am {expires_str}\n" if w.get("expires") else "**Dauer:** Permanent\n"
             msg += f"**Von:** {w['moderator']} am {w['date']}\n------------------------\n"
             
         for page in pagify(msg, page_length=1024):
@@ -280,6 +299,9 @@ class Fraktion(commands.Cog):
         async with self.config.factions() as f:
             if faction.lower() not in f:
                 return await ctx.send("❌ Diese Fraktion existiert nicht.")
+                
+            if "warnings" not in f[faction.lower()]:
+                return await ctx.send("❌ Diese Fraktion hat keine Verwarnungen.")
                 
             warnings = f[faction.lower()]["warnings"]
             initial_len = len(warnings)
