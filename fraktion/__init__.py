@@ -19,7 +19,7 @@ class Fraktion(commands.Cog):
             "illegal_board_channel": None,
             "changelog_channel": None,
             "warn_log_channel": None,
-            "warn_roles": [] # Neue Einstellung: Rollen-IDs, die Verwarnungen geben dürfen
+            "warn_roles": []
         }
         default_user = {
             "blacklists": []
@@ -31,13 +31,12 @@ class Fraktion(commands.Cog):
     # --- HELPER METHODEN ---
 
     def get_berlin_time(self):
-        """Gibt die aktuelle Zeit in Europe/Berlin zurück."""
         try:
             from zoneinfo import ZoneInfo
             return datetime.now(ZoneInfo("Europe/Berlin"))
         except Exception:
             from datetime import timezone
-            return datetime.now(timezone(timedelta(hours=2))) # Fallback
+            return datetime.now(timezone(timedelta(hours=2)))
 
     def is_faction_leader(self, user: discord.User, faction_data: dict) -> bool:
         guild = self.bot.get_guild(faction_data.get("guild_id", 0))
@@ -50,7 +49,6 @@ class Fraktion(commands.Cog):
         return any(role.id in leader_ids for role in member.roles)
 
     def parse_duration(self, duration_str: str):
-        """Parst Zeiträume wie 7d, 12h, 30m. Gibt ein datetime Objekt oder None (für perm) zurück. False bei ungültig."""
         if duration_str.lower() in ["perm", "permanent", "0"]:
             return None
         match = re.match(r"(\d+)([dhmw])", duration_str.lower())
@@ -69,20 +67,16 @@ class Fraktion(commands.Cog):
     # --- CUSTOM CHECKS ---
 
     def is_warn_authorized():
-        """Custom Check: Prüft, ob ein User Verwarnungen aussprechen darf."""
         async def predicate(ctx):
-            # Admins dürfen immer
             if ctx.author.guild_permissions.manage_guild:
                 return True
             
-            # Konfigurierte Rollen prüfen
             authorized_roles = await ctx.cog.config.warn_roles()
             if authorized_roles:
                 if any(role.id in authorized_roles for role in ctx.author.roles):
                     return True
                 return False
             
-            # Fallback, wenn keine Rollen eingestellt sind: Nachrichten verwalten
             return ctx.author.guild_permissions.manage_messages
             
         return commands.check(predicate)
@@ -118,15 +112,14 @@ class Fraktion(commands.Cog):
 
     @faction_setup.command(name="warnlog")
     async def setup_warnlog(self, ctx, channel: discord.TextChannel):
-        """Setzt den Channel, in dem alle Verwarnungen protokolliert werden."""
         await self.config.warn_log_channel.set(channel.id)
         await ctx.send(f"✅ Der Warn-Log-Channel wurde auf {channel.mention} gesetzt.")
 
     @faction_setup.command(name="warnroles", aliases=["warnrollen"])
-    async def setup_warnroles(self, ctx, *, roles: commands.Greedy[discord.Role]):
+    async def setup_warnroles(self, ctx, roles: commands.Greedy[discord.Role]):
         """Legt die Rollen fest, die Fraktionsverwarnungen aussprechen dürfen.
         
-        Beispiel: [p]fk setup warnroles @Support @Leitung 123456789
+        Beispiel: [p]fk setup warnroles @Support @Leitung
         (Lass die Rollen weg, um die Liste zu leeren.)
         """
         if not roles:
@@ -142,7 +135,6 @@ class Fraktion(commands.Cog):
     @faction_group.command(name="add")
     @commands.admin_or_permissions(manage_guild=True)
     async def faction_add(self, ctx, name: str, typ: str, guild_id: int, *, leader_role_ids: str):
-        """Fügt eine neue Fraktion hinzu."""
         try:
             role_ids = [int(r.strip()) for r in leader_role_ids.split(",")]
         except ValueError:
@@ -166,7 +158,6 @@ class Fraktion(commands.Cog):
     @faction_group.command(name="remove")
     @commands.admin_or_permissions(manage_guild=True)
     async def faction_remove(self, ctx, name: str):
-        """Entfernt eine Fraktion aus dem System."""
         async with self.config.factions() as factions:
             if name.lower() not in factions:
                 return await ctx.send("❌ Diese Fraktion existiert nicht.")
@@ -175,7 +166,6 @@ class Fraktion(commands.Cog):
 
     @faction_group.command(name="list", aliases=["liste"])
     async def faction_list(self, ctx):
-        """Zeigt alle Fraktionen inkl. aktueller Leitung an."""
         factions = await self.config.factions()
         if not factions:
             return await ctx.send("Aktuell sind keine Fraktionen registriert.")
@@ -217,7 +207,6 @@ class Fraktion(commands.Cog):
     @faction_group.command(name="warn", aliases=["verwarnung"])
     @is_warn_authorized()
     async def faction_warn(self, ctx, faction: str, *, reason_text: str):
-        """Gibt einer Fraktion eine Verwarnung. Dauer ist optional (Standard: perm)."""
         try:
             factions = await self.config.factions()
             if faction.lower() not in factions:
@@ -225,7 +214,6 @@ class Fraktion(commands.Cog):
                 
             faction_data = factions[faction.lower()]
             
-            # Smartes Parsen: Prüft, ob das erste Wort eine Zeitdauer ist
             parts = reason_text.split()
             duration = "perm"
             reason = reason_text
@@ -320,7 +308,6 @@ class Fraktion(commands.Cog):
 
     @faction_group.command(name="warns", aliases=["akte"])
     async def faction_warns(self, ctx, faction: str):
-        """Zeigt alle aktiven und abgelaufenen Verwarnungen einer Fraktion an."""
         factions = await self.config.factions()
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
@@ -349,7 +336,6 @@ class Fraktion(commands.Cog):
     @faction_group.command(name="unwarn", aliases=["removewarn"])
     @commands.admin_or_permissions(manage_guild=True)
     async def faction_unwarn(self, ctx, faction: str, warning_id: str):
-        """Entfernt eine Verwarnung anhand der Warn-ID (auch wenn sie noch nicht abgelaufen ist)."""
         async with self.config.factions() as f:
             if faction.lower() not in f:
                 return await ctx.send("❌ Diese Fraktion existiert nicht.")
@@ -371,12 +357,10 @@ class Fraktion(commands.Cog):
     @faction_group.group(name="blacklist", aliases=["bl"])
     @commands.admin_or_permissions(manage_messages=True)
     async def faction_blacklist(self, ctx):
-        """Verwaltung von Fraktions-Blacklists (Hausverbot/V-Mann Bann)."""
         pass
 
     @faction_blacklist.command(name="add")
     async def bl_add(self, ctx, user: discord.User, faction: str, *, reason: str):
-        """Setzt einen User auf die Blacklist einer Fraktion."""
         factions = await self.config.factions()
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
@@ -393,7 +377,6 @@ class Fraktion(commands.Cog):
 
     @faction_blacklist.command(name="remove")
     async def bl_remove(self, ctx, user: discord.User, faction: str):
-        """Entfernt einen User von der Fraktions-Blacklist."""
         async with self.config.user(user).blacklists() as blacklists:
             initial_len = len(blacklists)
             blacklists[:] = [b for b in blacklists if b["faction"].lower() != faction.lower()]
@@ -403,7 +386,6 @@ class Fraktion(commands.Cog):
 
     @faction_blacklist.command(name="check", aliases=["info"])
     async def bl_check(self, ctx, user: discord.User):
-        """Prüft, auf welchen Fraktions-Blacklists ein User steht."""
         blacklists = await self.config.user(user).blacklists()
         if not blacklists:
             return await ctx.send(f"✅ {user.name} steht auf keiner Fraktions-Blacklist.")
@@ -420,7 +402,6 @@ class Fraktion(commands.Cog):
 
     @faction_group.command(name="meldung")
     async def faction_meldung(self, ctx, faction: str, *, text: str):
-        """Postet eine öffentliche RP-Meldung ins Stadtblatt oder ans Schwarze Brett."""
         factions = await self.config.factions()
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
@@ -437,6 +418,11 @@ class Fraktion(commands.Cog):
         if not target_channel:
             return await ctx.send("❌ Der konfigurierte Channel konnte nicht gefunden werden.")
             
+        # Leader des Hauptdiscord pingen, damit sie die Meldung sehen
+        # Wir nehmen einfach die erste hinterlegte Rolle als Ping-Rolle
+        ping_roles = [f"<@&{rid}>" for rid in faction_data.get("leader_role_ids", [])]
+        ping_str = " | ".join(ping_roles)
+            
         embed = discord.Embed(
             title=f"📰 Neue Meldung: {faction_data.get('display_name', faction)}" if faction_data.get('type') == 'legal' else f"📜 Gerücht aus der Unterwelt: {faction_data.get('display_name', faction)}",
             description=text,
@@ -445,12 +431,11 @@ class Fraktion(commands.Cog):
         )
         embed.set_footer(text=f"Gezeichnet von {ctx.author.name}")
         
-        await target_channel.send(embed=embed)
+        await target_channel.send(content=f"{ping_str}" if ping_str else None, embed=embed)
         await ctx.send(f"✅ Deine Meldung wurde im {target_channel.mention} veröffentlicht.")
 
     @faction_group.command(name="changelog")
     async def faction_changelog(self, ctx, faction: str, *, text: str):
-        """Postet ein fraktionsinternes Update in den Changelog-Channel."""
         factions = await self.config.factions()
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
