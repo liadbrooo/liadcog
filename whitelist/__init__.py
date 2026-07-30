@@ -14,7 +14,8 @@ class FiveMWhitelist(commands.Cog):
             "wl_role": None,
             "ping_role": None,
             "extra_wl_roles": [],
-            "blacklist": [] # NEU: Liste der gesperrten User-IDs
+            "blacklist": [],
+            "blacklist_channel": None
         }
         self.config.register_guild(**default_guild)
         
@@ -117,16 +118,50 @@ class FiveMWhitelist(commands.Cog):
             await ctx.send("❌ Ich habe keine Berechtigung, diese Rolle zu entfernen. Bitte prüfe meine Rollen/Rechte.")
 
     @commands.command(name="lwb")
-    async def manual_blacklist(self, ctx: commands.Context, user_id: int):
-        """Setzt einen User auf die Blacklist, sodass er sich nicht mehr bewerben kann."""
+    async def manual_blacklist(self, ctx: commands.Context, user_id: int, *, reason: str):
+        """Setzt einen User auf die Blacklist (z.B. !lwb 123456789 Trolling im Support)."""
         if not await self.check_perms(ctx):
             return await ctx.send("❌ Du hast keine Berechtigung, dies zu tun.", delete_after=10)
-            
+
         async with self.config.guild(ctx.guild).blacklist() as blacklist:
-            if user_id not in blacklist:
-                blacklist.append(user_id)
+            if user_id in blacklist:
+                return await ctx.send("ℹ️ Dieser User steht bereits auf der Blacklist.")
+            blacklist.append(user_id)
+            
+        # Versuchen, den User zu finden und per DM zu informieren
+        member = None
+        try:
+            member = await ctx.guild.fetch_member(user_id)
+            if member:
+                try:
+                    await member.send(
+                        f"🚫 **Blacklist-Mitteilung**\n\n"
+                        f"Du wurdest leider auf **{ctx.guild.name}** von der Whitelist-Bewerbung ausgeschlossen.\n"
+                        f"**Grund:** {reason}\n\n"
+                        f"Bei Fragen dazu wende dich an ein Teammitglied."
+                    )
+                except discord.Forbidden:
+                    pass # DMs gesperrt
+        except discord.NotFound:
+            pass # User nicht auf dem Server
+            
+        # In den Blacklist-Log Channel posten
+        bl_channel_id = await self.config.guild(ctx.guild).blacklist_channel()
+        if bl_channel_id:
+            bl_channel = ctx.guild.get_channel(bl_channel_id)
+            if bl_channel:
+                embed = discord.Embed(
+                    title="🚫 User geblacklistet",
+                    color=discord.Color.dark_red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                user_display = member.mention if member else f"`{user_id}`"
+                embed.add_field(name="User", value=f"{user_display} (`{user_id}`)", inline=False)
+                embed.add_field(name="Admin", value=ctx.author.mention, inline=False)
+                embed.add_field(name="Grund", value=reason, inline=False)
+                await bl_channel.send(embed=embed)
                 
-        await ctx.send(f"✅ Der User `{user_id}` wurde auf die Blacklist gesetzt und kann sich nun nicht mehr bewerben.")
+        await ctx.send(f"✅ Der User `{user_id}` wurde erfolgreich auf die Blacklist gesetzt.")
 
     @commands.command(name="lunwb")
     async def manual_unblacklist(self, ctx: commands.Context, user_id: int):
@@ -134,11 +169,16 @@ class FiveMWhitelist(commands.Cog):
         if not await self.check_perms(ctx):
             return await ctx.send("❌ Du hast keine Berechtigung, dies zu tun.", delete_after=10)
             
+        was_blacklisted = False
         async with self.config.guild(ctx.guild).blacklist() as blacklist:
             if user_id in blacklist:
                 blacklist.remove(user_id)
+                was_blacklisted = True
                 
-        await ctx.send(f"✅ Der User `{user_id}` wurde von der Blacklist entfernt und kann sich wieder bewerben.")
+        if was_blacklisted:
+            await ctx.send(f"✅ Der User `{user_id}` wurde von der Blacklist entfernt und kann sich wieder bewerben.")
+        else:
+            await ctx.send("ℹ️ Dieser User stand gar nicht auf der Blacklist.")
 
     # --- SETUP WIZARD & SETTINGS ---
 
@@ -148,7 +188,7 @@ class FiveMWhitelist(commands.Cog):
         def check(m):
             return m.author == ctx.author and m.channel == ctx.channel
 
-        await ctx.send("**[1/4] Setup-Assistent:**\nBitte mentione den Channel, in dem die Bewerbungen landen sollen (z.B. `#team-bewerbungen`).")
+        await ctx.send("**[1/5] Setup-Assistent:**\nBitte mentione den Channel, in dem die Bewerbungen landen sollen (z.B. `#team-bewerbungen`).")
         try:
             msg = await self.bot.wait_for("message", check=check, timeout=60.0)
         except asyncio.TimeoutError:
@@ -158,7 +198,7 @@ class FiveMWhitelist(commands.Cog):
         log_channel = msg.channel_mentions[0]
         await self.config.guild(ctx.guild).log_channel.set(log_channel.id)
 
-        await ctx.send(f"✅ Log-Channel gesetzt auf {log_channel.mention}.\n\n**[2/4]** Bitte mentione jetzt die Rolle, die User erhalten sollen, wenn sie angenommen werden (z.B. `@Whitelist`).")
+        await ctx.send(f"✅ Log-Channel gesetzt auf {log_channel.mention}.\n\n**[2/5]** Bitte mentione jetzt die Rolle, die User erhalten sollen, wenn sie angenommen werden (z.B. `@Whitelist`).")
         try:
             msg = await self.bot.wait_for("message", check=check, timeout=60.0)
         except asyncio.TimeoutError:
@@ -168,7 +208,7 @@ class FiveMWhitelist(commands.Cog):
         wl_role = msg.role_mentions[0]
         await self.config.guild(ctx.guild).wl_role.set(wl_role.id)
 
-        await ctx.send(f"✅ Whitelist-Rolle gesetzt auf {wl_role.mention}.\n\n**[3/4]** Welche Rolle soll bei neuen Bewerbungen gepingt werden? (z.B. `@Support`). Schreibe `skip`, falls keine gepingt werden soll.")
+        await ctx.send(f"✅ Whitelist-Rolle gesetzt auf {wl_role.mention}.\n\n**[3/5]** Welche Rolle soll bei neuen Bewerbungen gepingt werden? (z.B. `@Support`). Schreibe `skip`, falls keine gepingt werden soll.")
         try:
             msg = await self.bot.wait_for("message", check=check, timeout=60.0)
         except asyncio.TimeoutError:
@@ -184,7 +224,7 @@ class FiveMWhitelist(commands.Cog):
             await ctx.send("❌ Ungültige Eingabe. Überspringe Ping-Rolle.")
             await self.config.guild(ctx.guild).ping_role.set(None)
 
-        await ctx.send("**[4/4]** Gib nun alle **weiteren** Rollen an, die Bewerbungen annehmen/ablehnen dürfen, aber NICHT gepingt werden sollen. Mentione sie einfach alle in einer Nachricht (z.B. `@Admin @Leitung`). Schreibe `skip`, falls es keine gibt.")
+        await ctx.send("**[4/5]** Gib nun alle **weiteren** Rollen an, die Bewerbungen annehmen/ablehnen dürfen, aber NICHT gepingt werden sollen. Mentione sie einfach alle in einer Nachricht (z.B. `@Admin @Leitung`). Schreibe `skip`, falls es keine gibt.")
         try:
             msg = await self.bot.wait_for("message", check=check, timeout=60.0)
         except asyncio.TimeoutError:
@@ -198,6 +238,19 @@ class FiveMWhitelist(commands.Cog):
             roles_str = ", ".join([r.mention for r in msg.role_mentions])
             await ctx.send(f"✅ Extra Whitelister-Rollen gesetzt: {roles_str}")
 
+        await ctx.send("**[5/5]** In welchen Channel sollen Blacklist-Einträge gepostet werden? (z.B. `#blacklist-log`). Schreibe `skip`, falls es keinen geben soll.")
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=60.0)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏱️ Zeit abgelaufen. Setup abgebrochen.")
+        if msg.content.lower() == "skip" or not msg.channel_mentions:
+            await self.config.guild(ctx.guild).blacklist_channel.set(None)
+            await ctx.send("✅ Kein Blacklist-Channel festgelegt.")
+        else:
+            bl_channel = msg.channel_mentions[0]
+            await self.config.guild(ctx.guild).blacklist_channel.set(bl_channel.id)
+            await ctx.send(f"✅ Blacklist-Channel gesetzt auf {bl_channel.mention}.")
+
         await ctx.send("🎉 **Setup erfolgreich abgeschlossen!** Du kannst nun das Panel mit `!lwhitelist setup` posten.")
 
     @lwhitelist_group.command(name="setchannel")
@@ -205,6 +258,15 @@ class FiveMWhitelist(commands.Cog):
         """Setzt den Channel, in dem die Bewerbungen an das Team gesendet werden."""
         await self.config.guild(ctx.guild).log_channel.set(channel.id)
         await ctx.send(f"✅ Bewerbungs-Channel wurde auf {channel.mention} gesetzt.")
+
+    @lwhitelist_group.command(name="setblchannel")
+    async def set_bl_channel(self, ctx: commands.Context, channel: discord.TextChannel = None):
+        """Setzt den Channel für Blacklist-Logs."""
+        await self.config.guild(ctx.guild).blacklist_channel.set(channel.id if channel else None)
+        if channel:
+            await ctx.send(f"✅ Blacklist-Log-Channel wurde auf {channel.mention} gesetzt.")
+        else:
+            await ctx.send("✅ Blacklist-Log-Channel wurde entfernt.")
 
     @lwhitelist_group.command(name="setrole")
     async def set_wl_role(self, ctx: commands.Context, role: discord.Role):
@@ -245,14 +307,16 @@ class FiveMWhitelist(commands.Cog):
         log_ch = ctx.guild.get_channel(settings["log_channel"]) if settings["log_channel"] else "Nicht gesetzt"
         wl_r = ctx.guild.get_role(settings["wl_role"]) if settings["wl_role"] else "Nicht gesetzt"
         ping_r = ctx.guild.get_role(settings["ping_role"]) if settings["ping_role"] else "Nicht gesetzt"
+        bl_ch = ctx.guild.get_channel(settings["blacklist_channel"]) if settings["blacklist_channel"] else "Nicht gesetzt"
         extra_rs = [ctx.guild.get_role(r).mention for r in settings["extra_wl_roles"] if ctx.guild.get_role(r)]
         extra_str = ", ".join(extra_rs) if extra_rs else "Keine gesetzt"
 
         embed = discord.Embed(title="⚙️ Whitelist System Einstellungen", color=discord.Color.blue())
-        embed.add_field(name="Log Channel", value=log_ch.mention if isinstance(log_ch, discord.TextChannel) else log_ch, inline=False)
+        embed.add_field(name="Bewerbungs Channel", value=log_ch.mention if isinstance(log_ch, discord.TextChannel) else log_ch, inline=False)
         embed.add_field(name="Whitelist Rolle", value=wl_r.mention if isinstance(wl_r, discord.Role) else wl_r, inline=False)
         embed.add_field(name="Ping Rolle", value=ping_r.mention if isinstance(ping_r, discord.Role) else ping_r, inline=False)
         embed.add_field(name="Extra Whitelister Rollen", value=extra_str, inline=False)
+        embed.add_field(name="Blacklist Log Channel", value=bl_ch.mention if isinstance(bl_ch, discord.TextChannel) else bl_ch, inline=False)
         
         await ctx.send(embed=embed)
 
@@ -280,12 +344,16 @@ class WhitelistButtonView(discord.ui.View):
         super().__init__(timeout=None)
         self.config = config
 
-    @discord.ui.button(label="Bewerbung starten", style=discord.ButtonStyle.primary, custom_id="fivem_wl_start_v9", emoji="📝")
+    @discord.ui.button(label="Bewerbung starten", style=discord.ButtonStyle.primary, custom_id="fivem_wl_start_v10", emoji="📝")
     async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         # 1. Prüfen ob User auf der Blacklist steht
         blacklist = await self.config.guild(interaction.guild).blacklist()
         if interaction.user.id in blacklist:
-            return await interaction.response.send_message("❌ Du wurdest von der Bewerbung ausgeschlossen (Blacklist).", ephemeral=True)
+            return await interaction.response.send_message(
+                "🚫 **Du befindest dich auf der Blacklist!**\n"
+                "Du wurdest von der Whitelist-Bewerbung ausgeschlossen. Bei Fragen dazu wende dich an ein Teammitglied.",
+                ephemeral=True
+            )
 
         # 2. Prüfen ob User schon WL hat
         wl_role_id = await self.config.guild(interaction.guild).wl_role()
@@ -405,7 +473,7 @@ class ApplicationActionsView(discord.ui.View):
                 
         return False
 
-    @discord.ui.button(label="Annehmen", style=discord.ButtonStyle.success, custom_id="fivem_wl_accept_v9", emoji="✅")
+    @discord.ui.button(label="Annehmen", style=discord.ButtonStyle.success, custom_id="fivem_wl_accept_v10", emoji="✅")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -438,7 +506,7 @@ class ApplicationActionsView(discord.ui.View):
         if dm_failed:
             await interaction.followup.send("⚠️ Der User wurde angenommen, hat aber seine **DMs gesperrt**! Bitte informiere ihn manuell.", ephemeral=True)
 
-    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="fivem_wl_reject_v9", emoji="❌")
+    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="fivem_wl_reject_v10", emoji="❌")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -450,7 +518,7 @@ class ApplicationActionsView(discord.ui.View):
         modal = RejectReasonModal(applicant, interaction.message, interaction.guild.name, interaction.user)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Rückfragen", style=discord.ButtonStyle.secondary, custom_id="fivem_wl_questions_v9", emoji="❓")
+    @discord.ui.button(label="Rückfragen", style=discord.ButtonStyle.secondary, custom_id="fivem_wl_questions_v10", emoji="❓")
     async def questions(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -475,7 +543,7 @@ class ApplicationActionsView(discord.ui.View):
         
         new_view = ApplicationActionsView(self.config)
         for child in new_view.children:
-            if child.custom_id == "fivem_wl_questions_v9":
+            if child.custom_id == "fivem_wl_questions_v10":
                 child.disabled = True
                 
         await interaction.response.edit_message(content=f"🔔 Rückfragen von {interaction.user.mention}", embed=embed, view=new_view)
