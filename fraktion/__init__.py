@@ -12,9 +12,13 @@ class Fraktion(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210, force_registration=True)
-        
+
+        # Nur die Fraktionsliste wird global gespeichert
         default_global = {
-            "factions": {},
+            "factions": {}
+        }
+        # Alle Kanaleinstellungen sind pro Server (Guild)
+        default_guild = {
             "legal_board_channel": None,
             "illegal_board_channel": None,
             "changelog_channel": None,
@@ -24,8 +28,9 @@ class Fraktion(commands.Cog):
         default_user = {
             "blacklists": []
         }
-        
+
         self.config.register_global(**default_global)
+        self.config.register_guild(**default_guild)
         self.config.register_user(**default_user)
 
     # --- HELPER METHODEN ---
@@ -38,12 +43,15 @@ class Fraktion(commands.Cog):
             from datetime import timezone
             return datetime.now(timezone(timedelta(hours=2)))
 
-    def is_faction_leader(self, user: discord.User, faction_data: dict) -> bool:
+    async def is_faction_leader(self, user: discord.User, faction_data: dict) -> bool:
+        """Überprüft asynchron, ob der Nutzer eine Leader-Rolle der Fraktion besitzt."""
         guild = self.bot.get_guild(faction_data.get("guild_id", 0))
         if not guild:
             return False
-        member = guild.get_member(user.id)
-        if not member:
+        try:
+            # Nutzt die API, um den Member auch ohne Cache zu finden
+            member = await guild.fetch_member(user.id)
+        except (discord.NotFound, discord.Forbidden):
             return False
         leader_ids = faction_data.get("leader_role_ids", [])
         return any(role.id in leader_ids for role in member.roles)
@@ -51,16 +59,16 @@ class Fraktion(commands.Cog):
     def parse_duration(self, duration_str: str):
         if duration_str.lower() in ["perm", "permanent", "0"]:
             return None
-        match = re.match(r"(\d+)([dhmw])", duration_str.lower())
+        match = re.match(r"(\d+)([dhmwM])", duration_str)
         if not match:
-            return False 
+            return False
         amount = int(match.group(1))
         unit = match.group(2)
         if unit == "m": delta = timedelta(minutes=amount)
         elif unit == "h": delta = timedelta(hours=amount)
         elif unit == "d": delta = timedelta(days=amount)
         elif unit == "w": delta = timedelta(weeks=amount)
-        
+        elif unit == "M": delta = timedelta(days=30 * amount)  # Monat = 30 Tage
         berlin_now = self.get_berlin_time()
         return berlin_now + delta
 
@@ -70,15 +78,13 @@ class Fraktion(commands.Cog):
         async def predicate(ctx):
             if ctx.author.guild_permissions.manage_guild:
                 return True
-            
-            authorized_roles = await ctx.cog.config.warn_roles()
+            # Jetzt pro Server (Guild) abrufen
+            authorized_roles = await ctx.cog.config.guild(ctx.guild).warn_roles()
             if authorized_roles:
                 if any(role.id in authorized_roles for role in ctx.author.roles):
                     return True
                 return False
-            
             return ctx.author.guild_permissions.manage_messages
-            
         return commands.check(predicate)
 
     # --- EINSTELLUNGEN ---
@@ -97,36 +103,36 @@ class Fraktion(commands.Cog):
 
     @faction_setup.command(name="stadtblatt")
     async def setup_stadtblatt(self, ctx, channel: discord.TextChannel):
-        await self.config.legal_board_channel.set(channel.id)
+        await self.config.guild(ctx.guild).legal_board_channel.set(channel.id)
         await ctx.send(f"✅ Das Stadtblatt wurde auf {channel.mention} gesetzt.")
 
     @faction_setup.command(name="schwarzesbrett")
     async def setup_schwarzesbrett(self, ctx, channel: discord.TextChannel):
-        await self.config.illegal_board_channel.set(channel.id)
+        await self.config.guild(ctx.guild).illegal_board_channel.set(channel.id)
         await ctx.send(f"✅ Das Schwarze Brett wurde auf {channel.mention} gesetzt.")
 
     @faction_setup.command(name="changelog")
     async def setup_changelog(self, ctx, channel: discord.TextChannel):
-        await self.config.changelog_channel.set(channel.id)
+        await self.config.guild(ctx.guild).changelog_channel.set(channel.id)
         await ctx.send(f"✅ Der Fraktions-Changelog-Channel wurde auf {channel.mention} gesetzt.")
 
     @faction_setup.command(name="warnlog")
     async def setup_warnlog(self, ctx, channel: discord.TextChannel):
-        await self.config.warn_log_channel.set(channel.id)
+        await self.config.guild(ctx.guild).warn_log_channel.set(channel.id)
         await ctx.send(f"✅ Der Warn-Log-Channel wurde auf {channel.mention} gesetzt.")
 
     @faction_setup.command(name="warnroles", aliases=["warnrollen"])
     async def setup_warnroles(self, ctx, roles: commands.Greedy[discord.Role]):
         """Legt die Rollen fest, die Fraktionsverwarnungen aussprechen dürfen.
-        
+
         Beispiel: [p]fk setup warnroles @Support @Leitung
         """
         if not roles:
-            await self.config.warn_roles.set([])
+            await self.config.guild(ctx.guild).warn_roles.set([])
             return await ctx.send("✅ Die autorisierten Rollen wurden zurückgesetzt. Ab sofort greift wieder die Standard-Berechtigung (Nachrichten verwalten).")
-            
+
         role_ids = [r.id for r in roles]
-        await self.config.warn_roles.set(role_ids)
+        await self.config.guild(ctx.guild).warn_roles.set(role_ids)
         await ctx.send(f"✅ Folgende Rollen dürfen ab sofort Fraktionsverwarnungen aussprechen:\n{', '.join(r.mention for r in roles)}")
 
     # --- FRAKTIONSVERWALTUNG ---
@@ -169,14 +175,13 @@ class Fraktion(commands.Cog):
         factions = await self.config.factions()
         if not factions:
             return await ctx.send("Aktuell sind keine Fraktionen registriert.")
-            
-        # Discord erlaubt max 25 Felder pro Embed. Wir teilen die Liste in 25er Blöcke auf.
+
         faction_items = list(factions.items())
         pages = []
-        
+
         for i in range(0, len(faction_items), 25):
             chunk = faction_items[i:i+25]
-            
+
             embed = discord.Embed(
                 title="🚓 Fraktionsübersicht" if i == 0 else "🚓 Fraktionsübersicht (Fortsetzung)",
                 color=discord.Color.blue(),
@@ -184,41 +189,32 @@ class Fraktion(commands.Cog):
             )
             if i == 0:
                 embed.set_footer(text=f"Insgesamt {len(factions)} Fraktionen registriert.")
-                
+
             for key, data in chunk:
                 guild = self.bot.get_guild(data.get("guild_id", 0))
                 emoji = "🛡️" if data.get("type", "legal") == "legal" else "💀"
                 name = data.get('display_name', key)
-                
+
                 desc = ""
                 if guild:
-                    leaders = []
-                    leader_role_names = []
-                    leader_ids = data.get("leader_role_ids", [])
-                    for member in guild.members:
-                        member_leader_roles = [r for r in member.roles if r.id in leader_ids]
-                        if member_leader_roles:
-                            leaders.append(member.mention)
-                            for r in member_leader_roles:
-                                if r.name not in leader_role_names:
-                                    leader_role_names.append(r.name)
-                    
                     desc += f"**Server:** `{guild.name}`\n"
-                    if leaders:
-                        desc += f"**Leitung** ({', '.join(leader_role_names)}):\n{', '.join(leaders)}\n"
+                    leader_ids = data.get("leader_role_ids", [])
+                    if leader_ids:
+                        role_mentions = [f"<@&{rid}>" for rid in leader_ids]
+                        desc += f"**Leitung:** {' '.join(role_mentions)}\n"
                     else:
-                        desc += "**Leitung:** Keine Leader online/gefunden\n"
+                        desc += "**Leitung:** Keine Leader-Rollen definiert\n"
                 else:
                     desc += f"**Server:** `Nicht gefunden (ID: {data.get('guild_id', 0)})`\n"
                     desc += "**Leitung:** `Bot ist nicht auf dem Server`\n"
-                    
+
                 warns = len(data.get('warnings', []))
                 desc += f"**Verwarnungen:** `{warns}`"
-                
+
                 embed.add_field(name=f"{emoji} {name}", value=desc, inline=False)
-                
+
             pages.append(embed)
-            
+
         for page in pages:
             await ctx.send(embed=page)
 
@@ -231,81 +227,55 @@ class Fraktion(commands.Cog):
             factions = await self.config.factions()
             if faction.lower() not in factions:
                 return await ctx.send("❌ Diese Fraktion existiert nicht.")
-                
+
             faction_data = factions[faction.lower()]
-            
+
             parts = reason_text.split()
             duration = "perm"
             reason = reason_text
-            
+
             if len(parts) > 1:
                 test_dur = self.parse_duration(parts[0])
                 if test_dur is not False:
                     duration = parts[0]
                     reason = " ".join(parts[1:])
-                    
+
             if not reason:
                 return await ctx.send("❌ Du musst einen Grund angeben.")
-                
+
             expires_at = self.parse_duration(duration)
-                
+
             warning_id = str(uuid.uuid4())[:8]
             current_time = self.get_berlin_time()
             current_time_str = current_time.strftime("%d.%m.%Y %H:%M")
-            
+
             if expires_at:
                 expires_str = expires_at.strftime("%d.%m.%Y %H:%M")
             else:
                 expires_str = "Permanent"
-            
-            guild = self.bot.get_guild(faction_data.get("guild_id", 0))
-            notified_leaders = []
-            leader_ids = faction_data.get("leader_role_ids", [])
-            
-            if guild and leader_ids:
-                for member in guild.members:
-                    if any(role.id in leader_ids for role in member.roles):
-                        notified_leaders.append(member.mention)
-                        try:
-                            dm_embed = discord.Embed(
-                                title="⚠️ Amtliche Fraktionsverwarnung",
-                                description=f"Eure Fraktion **{faction_data.get('display_name', faction)}** hat eine Verwarnung erhalten.",
-                                color=discord.Color.red(),
-                                timestamp=current_time
-                            )
-                            dm_embed.add_field(name="🆔 Verwarnungs-ID", value=f"`{warning_id}`", inline=True)
-                            dm_embed.add_field(name="⏳ Dauer", value=f"`{expires_str}`", inline=True)
-                            dm_embed.add_field(name="📝 Begründung", value=reason, inline=False)
-                            dm_embed.set_footer(text=f"Ausgestellt durch: {ctx.author.name}")
-                            await member.send(embed=dm_embed)
-                        except Exception:
-                            pass
-            
+
+            # Verwarnung speichern
             async with self.config.factions() as f:
                 if "warnings" not in f[faction.lower()]:
                     f[faction.lower()]["warnings"] = []
-                    
+
                 f[faction.lower()]["warnings"].append({
-                    "id": warning_id, 
-                    "reason": reason, 
-                    "moderator": ctx.author.name, 
+                    "id": warning_id,
+                    "reason": reason,
+                    "moderator": ctx.author.name,
                     "date": current_time_str,
                     "expires": expires_at.timestamp() if expires_at else None
                 })
-                
+
+            # Bestätigungs-Embed
             embed = discord.Embed(title="⚠️ Verwarnung ausgesprochen", color=discord.Color.red(), timestamp=current_time)
             embed.add_field(name="Fraktion", value=faction_data.get('display_name', faction), inline=True)
             embed.add_field(name="Warn-ID", value=warning_id, inline=True)
             embed.add_field(name="Dauer", value=expires_str, inline=True)
             embed.add_field(name="Grund", value=reason, inline=False)
-            
-            leaders_str = ", ".join(notified_leaders) if notified_leaders else "Keine Leader gefunden"
-            if len(leaders_str) > 1024: leaders_str = f"{len(notified_leaders)} Leader wurden per DM benachrichtigt."
-            embed.add_field(name="Benachrichtigte Leader", value=leaders_str, inline=False)
-            
-            await ctx.send(embed=embed)
-            
-            log_channel_id = await self.config.warn_log_channel()
+
+            # Log-Channel und Ping an Leader-Rollen
+            log_channel_id = await self.config.guild(ctx.guild).warn_log_channel()
             if log_channel_id:
                 log_channel = self.bot.get_channel(log_channel_id)
                 if log_channel:
@@ -315,10 +285,17 @@ class Fraktion(commands.Cog):
                     log_embed.add_field(name="Dauer", value=expires_str, inline=True)
                     log_embed.add_field(name="Grund", value=reason, inline=False)
                     log_embed.set_footer(text=f"Ausgestellt von {ctx.author.name}")
+
+                    # Leader-Rollen pingen, damit alle Verantwortlichen sofort benachrichtigt werden
+                    leader_ids = faction_data.get("leader_role_ids", [])
+                    ping_roles = [f"<@&{rid}>" for rid in leader_ids]
                     try:
-                        await log_channel.send(embed=log_embed)
+                        await log_channel.send(content=" ".join(ping_roles) if ping_roles else None, embed=log_embed)
+                        embed.add_field(name="Benachrichtigung", value="Leader-Rollen wurden im Log-Kanal gepingt.", inline=False)
                     except:
                         pass
+
+            await ctx.send(embed=embed)
 
         except Exception as e:
             error_msg = f"```py\n{traceback.format_exc()}\n```"
@@ -331,24 +308,24 @@ class Fraktion(commands.Cog):
         factions = await self.config.factions()
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
-            
+
         warnings = factions[faction.lower()].get("warnings", [])
         if not warnings:
             return await ctx.send(f"✅ Die Fraktion **{faction}** hat keine Verwarnungen.")
-            
+
         embed = discord.Embed(title=f"Fraktionsakte: {faction}", description=f"Insgesamt {len(warnings)} Eintrag(en).", color=discord.Color.orange())
         msg = ""
-        
+
         now = datetime.now().timestamp()
         for w in warnings:
             status = "**[ABGELAUFEN]**" if w.get("expires") and w["expires"] < now else "**[AKTIV]**"
             expires_str = datetime.fromtimestamp(w["expires"]).strftime("%d.%m.%Y %H:%M") if w.get("expires") else "Permanent"
-            
+
             msg += f"{status} **ID:** `{w['id']}`\n"
             msg += f"**Grund:** {w['reason']}\n"
             msg += f"**Dauer:** Läuft ab am {expires_str}\n" if w.get("expires") else "**Dauer:** Permanent\n"
             msg += f"**Von:** {w['moderator']} am {w['date']}\n------------------------\n"
-            
+
         for page in pagify(msg, page_length=1024):
             embed.add_field(name="\u200b", value=page, inline=False)
         await ctx.send(embed=embed)
@@ -359,17 +336,17 @@ class Fraktion(commands.Cog):
         async with self.config.factions() as f:
             if faction.lower() not in f:
                 return await ctx.send("❌ Diese Fraktion existiert nicht.")
-                
+
             if "warnings" not in f[faction.lower()]:
                 return await ctx.send("❌ Diese Fraktion hat keine Verwarnungen.")
-                
+
             warnings = f[faction.lower()]["warnings"]
             initial_len = len(warnings)
             warnings[:] = [w for w in warnings if w["id"] != warning_id]
-            
+
             if len(warnings) == initial_len:
                 return await ctx.send("❌ Keine Verwarnung mit dieser ID bei dieser Fraktion gefunden.")
-                
+
         await ctx.send(f"✅ Verwarnung `{warning_id}` wurde von der Fraktion **{faction}** entfernt.")
 
     # --- BLACKLIST SYSTEM ---
@@ -384,7 +361,7 @@ class Fraktion(commands.Cog):
         factions = await self.config.factions()
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
-            
+
         current_time = self.get_berlin_time().strftime("%d.%m.%Y")
         async with self.config.user(user).blacklists() as blacklists:
             if any(b["faction"].lower() == faction.lower() for b in blacklists):
@@ -409,7 +386,7 @@ class Fraktion(commands.Cog):
         blacklists = await self.config.user(user).blacklists()
         if not blacklists:
             return await ctx.send(f"✅ {user.name} steht auf keiner Fraktions-Blacklist.")
-            
+
         embed = discord.Embed(title=f"🚫 Blacklist-Akte: {user.name}", color=discord.Color.dark_red())
         msg = ""
         for b in blacklists:
@@ -425,22 +402,22 @@ class Fraktion(commands.Cog):
         factions = await self.config.factions()
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
-            
+
         faction_data = factions[faction.lower()]
-        if not self.is_faction_leader(ctx.author, faction_data):
+        if not await self.is_faction_leader(ctx.author, faction_data):
             return await ctx.send("❌ Du bist kein Leader dieser Fraktion und darfst keine Meldungen absetzen.")
-            
-        channel_id = await self.config.legal_board_channel() if faction_data.get("type", "legal") == "legal" else await self.config.illegal_board_channel()
+
+        channel_id = await self.config.guild(ctx.guild).legal_board_channel() if faction_data.get("type", "legal") == "legal" else await self.config.guild(ctx.guild).illegal_board_channel()
         if not channel_id:
             return await ctx.send("❌ Es wurde kein Channel für das Stadtblatt / Schwarze Brett eingerichtet.")
-            
+
         target_channel = self.bot.get_channel(channel_id)
         if not target_channel:
             return await ctx.send("❌ Der konfigurierte Channel konnte nicht gefunden werden.")
-            
+
         ping_roles = [f"<@&{rid}>" for rid in faction_data.get("leader_role_ids", [])]
         ping_str = " | ".join(ping_roles)
-            
+
         embed = discord.Embed(
             title=f"📰 Neue Meldung: {faction_data.get('display_name', faction)}" if faction_data.get('type') == 'legal' else f"📜 Gerücht aus der Unterwelt: {faction_data.get('display_name', faction)}",
             description=text,
@@ -448,7 +425,7 @@ class Fraktion(commands.Cog):
             timestamp=self.get_berlin_time()
         )
         embed.set_footer(text=f"Gezeichnet von {ctx.author.name}")
-        
+
         await target_channel.send(content=f"{ping_str}" if ping_str else None, embed=embed)
         await ctx.send(f"✅ Deine Meldung wurde im {target_channel.mention} veröffentlicht.")
 
@@ -457,19 +434,19 @@ class Fraktion(commands.Cog):
         factions = await self.config.factions()
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
-            
+
         faction_data = factions[faction.lower()]
-        if not self.is_faction_leader(ctx.author, faction_data):
+        if not await self.is_faction_leader(ctx.author, faction_data):
             return await ctx.send("❌ Du bist kein Leader dieser Fraktion.")
-            
-        channel_id = await self.config.changelog_channel()
+
+        channel_id = await self.config.guild(ctx.guild).changelog_channel()
         if not channel_id:
             return await ctx.send("❌ Es wurde kein Changelog-Channel eingerichtet.")
-            
+
         target_channel = self.bot.get_channel(channel_id)
         if not target_channel:
             return await ctx.send("❌ Der konfigurierte Channel konnte nicht gefunden werden.")
-            
+
         embed = discord.Embed(
             title=f"📝 Fraktions-Update: {faction_data.get('display_name', faction)}",
             description=text,
@@ -477,7 +454,7 @@ class Fraktion(commands.Cog):
             timestamp=self.get_berlin_time()
         )
         embed.set_footer(text=f"Verkündet von {ctx.author.name}")
-        
+
         await target_channel.send(embed=embed)
         await ctx.send("✅ Dein Changelog-Eintrag wurde gepostet.")
 
