@@ -239,7 +239,7 @@ class Fraktion(commands.Cog):
                 log_embed.add_field(name="Warn-ID", value=warning_id, inline=True)
                 log_embed.add_field(name="Dauer", value=expires_str, inline=True)
                 log_embed.add_field(name="Grund", value=reason, inline=False)
-                log_embed.set_footer(text=f="Ausgestellt von {ctx.author.name}")
+                log_embed.set_footer(text=f"Ausgestellt von {ctx.author.name}") # HIER WAR DER FEHLER
                 try:
                     await log_channel.send(embed=log_embed)
                 except:
