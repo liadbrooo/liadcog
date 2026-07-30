@@ -120,7 +120,6 @@ class Fraktion(commands.Cog):
         """Legt die Rollen fest, die Fraktionsverwarnungen aussprechen dürfen.
         
         Beispiel: [p]fk setup warnroles @Support @Leitung
-        (Lass die Rollen weg, um die Liste zu leeren.)
         """
         if not roles:
             await self.config.warn_roles.set([])
@@ -166,41 +165,62 @@ class Fraktion(commands.Cog):
 
     @faction_group.command(name="list", aliases=["liste"])
     async def faction_list(self, ctx):
+        """Zeigt alle Fraktionen inkl. aktueller Leitung an."""
         factions = await self.config.factions()
         if not factions:
             return await ctx.send("Aktuell sind keine Fraktionen registriert.")
             
-        embed = discord.Embed(title="🚓 Fraktionsliste", color=discord.Color.blue())
-        msg = ""
+        # Discord erlaubt max 25 Felder pro Embed. Wir teilen die Liste in 25er Blöcke auf.
+        faction_items = list(factions.items())
+        pages = []
         
-        for key, data in factions.items():
-            guild = self.bot.get_guild(data.get("guild_id", 0))
-            emoji = "🛡️" if data.get("type", "legal") == "legal" else "💀"
-            msg += f"{emoji} **{data.get('display_name', key)}**\n"
+        for i in range(0, len(faction_items), 25):
+            chunk = faction_items[i:i+25]
             
-            if guild:
-                leaders = []
-                leader_role_names = []
-                leader_ids = data.get("leader_role_ids", [])
-                for member in guild.members:
-                    member_leader_roles = [r for r in member.roles if r.id in leader_ids]
-                    if member_leader_roles:
-                        leaders.append(member.display_name)
-                        for r in member_leader_roles:
-                            if r.name not in leader_role_names:
-                                leader_role_names.append(r.name)
+            embed = discord.Embed(
+                title="🚓 Fraktionsübersicht" if i == 0 else "🚓 Fraktionsübersicht (Fortsetzung)",
+                color=discord.Color.blue(),
+                timestamp=self.get_berlin_time()
+            )
+            if i == 0:
+                embed.set_footer(text=f"Insgesamt {len(factions)} Fraktionen registriert.")
                 
-                msg += f"└ Server: `{guild.name}`\n"
-                msg += f"└ Leitung ({', '.join(leader_role_names)}): {', '.join(leaders) if leaders else 'Keine Leader online/gefunden'}\n"
-            else:
-                msg += f"└ Server: `Nicht gefunden (ID: {data.get('guild_id', 0)})`\n"
-                msg += f"└ Leitung: `Bot ist nicht auf dem Server`\n"
+            for key, data in chunk:
+                guild = self.bot.get_guild(data.get("guild_id", 0))
+                emoji = "🛡️" if data.get("type", "legal") == "legal" else "💀"
+                name = data.get('display_name', key)
                 
-            msg += f"└ Aktive Verwarnungen: `{len(data.get('warnings', []))}`\n\n"
+                desc = ""
+                if guild:
+                    leaders = []
+                    leader_role_names = []
+                    leader_ids = data.get("leader_role_ids", [])
+                    for member in guild.members:
+                        member_leader_roles = [r for r in member.roles if r.id in leader_ids]
+                        if member_leader_roles:
+                            leaders.append(member.mention)
+                            for r in member_leader_roles:
+                                if r.name not in leader_role_names:
+                                    leader_role_names.append(r.name)
+                    
+                    desc += f"**Server:** `{guild.name}`\n"
+                    if leaders:
+                        desc += f"**Leitung** ({', '.join(leader_role_names)}):\n{', '.join(leaders)}\n"
+                    else:
+                        desc += "**Leitung:** Keine Leader online/gefunden\n"
+                else:
+                    desc += f"**Server:** `Nicht gefunden (ID: {data.get('guild_id', 0)})`\n"
+                    desc += "**Leitung:** `Bot ist nicht auf dem Server`\n"
+                    
+                warns = len(data.get('warnings', []))
+                desc += f"**Verwarnungen:** `{warns}`"
+                
+                embed.add_field(name=f"{emoji} {name}", value=desc, inline=False)
+                
+            pages.append(embed)
             
-        for page in pagify(msg, page_length=1024):
-            embed.add_field(name="\u200b", value=page, inline=False)
-        await ctx.send(embed=embed)
+        for page in pages:
+            await ctx.send(embed=page)
 
     # --- VERWARNUNGEN (STRIKES) ---
 
@@ -418,8 +438,6 @@ class Fraktion(commands.Cog):
         if not target_channel:
             return await ctx.send("❌ Der konfigurierte Channel konnte nicht gefunden werden.")
             
-        # Leader des Hauptdiscord pingen, damit sie die Meldung sehen
-        # Wir nehmen einfach die erste hinterlegte Rolle als Ping-Rolle
         ping_roles = [f"<@&{rid}>" for rid in faction_data.get("leader_role_ids", [])]
         ping_str = " | ".join(ping_roles)
             
