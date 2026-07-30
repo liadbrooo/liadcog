@@ -306,3 +306,8 @@ class Fraktion(commands.Cog):
         
         await target_channel.send(embed=embed)
         await ctx.send("✅ Dein Changelog-Eintrag wurde gepostet.")
+
+
+# --- SETUP FUNCTION (Zwingend erforderlich für Redbot) ---
+async def setup(bot):
+    await bot.add_cog(Fraktion(bot))
