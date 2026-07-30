@@ -4,6 +4,7 @@ from redbot.core.utils.chat_formatting import pagify
 from datetime import datetime, timedelta
 import uuid
 import re
+import traceback
 
 class Fraktion(commands.Cog):
     """Fraktionsverwaltung für FiveM DE-RP Server (Haupt- und Fraktions-Discords)"""
@@ -27,15 +28,26 @@ class Fraktion(commands.Cog):
         self.config.register_user(**default_user)
 
     # --- HELPER METHODEN ---
-    
+
+    def get_berlin_time(self):
+        """Gibt die aktuelle Zeit in Europe/Berlin zurück."""
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo("Europe/Berlin"))
+        except Exception:
+            # Fallback falls Python veraltet ist
+            from datetime import timezone, timedelta
+            return datetime.now(timezone(timedelta(hours=2))) # Vereinfachter Fallback
+
     def is_faction_leader(self, user: discord.User, faction_data: dict) -> bool:
-        guild = self.bot.get_guild(faction_data["guild_id"])
+        guild = self.bot.get_guild(faction_data.get("guild_id", 0))
         if not guild:
             return False
         member = guild.get_member(user.id)
         if not member:
             return False
-        return any(role.id in faction_data["leader_role_ids"] for role in member.roles)
+        leader_ids = faction_data.get("leader_role_ids", [])
+        return any(role.id in leader_ids for role in member.roles)
 
     def parse_duration(self, duration_str: str):
         """Parst Zeiträume wie 7d, 12h, 30m. Gibt ein datetime Objekt oder None (für perm) zurück. False bei ungültig."""
@@ -50,7 +62,9 @@ class Fraktion(commands.Cog):
         elif unit == "h": delta = timedelta(hours=amount)
         elif unit == "d": delta = timedelta(days=amount)
         elif unit == "w": delta = timedelta(weeks=amount)
-        return datetime.now() + delta
+        
+        berlin_now = self.get_berlin_time()
+        return berlin_now + delta
 
     # --- EINSTELLUNGEN ---
 
@@ -134,15 +148,16 @@ class Fraktion(commands.Cog):
         msg = ""
         
         for key, data in factions.items():
-            guild = self.bot.get_guild(data["guild_id"])
-            emoji = "🛡️" if data["type"] == "legal" else "💀"
-            msg += f"{emoji} **{data['display_name']}**\n"
+            guild = self.bot.get_guild(data.get("guild_id", 0))
+            emoji = "🛡️" if data.get("type", "legal") == "legal" else "💀"
+            msg += f"{emoji} **{data.get('display_name', key)}**\n"
             
             if guild:
                 leaders = []
                 leader_role_names = []
+                leader_ids = data.get("leader_role_ids", [])
                 for member in guild.members:
-                    member_leader_roles = [r for r in member.roles if r.id in data["leader_role_ids"]]
+                    member_leader_roles = [r for r in member.roles if r.id in leader_ids]
                     if member_leader_roles:
                         leaders.append(member.display_name)
                         for r in member_leader_roles:
@@ -152,7 +167,7 @@ class Fraktion(commands.Cog):
                 msg += f"└ Server: `{guild.name}`\n"
                 msg += f"└ Leitung ({', '.join(leader_role_names)}): {', '.join(leaders) if leaders else 'Keine Leader online/gefunden'}\n"
             else:
-                msg += f"└ Server: `Nicht gefunden (ID: {data['guild_id']})`\n"
+                msg += f"└ Server: `Nicht gefunden (ID: {data.get('guild_id', 0)})`\n"
                 msg += f"└ Leitung: `Bot ist nicht auf dem Server`\n"
                 
             msg += f"└ Aktive Verwarnungen: `{len(data.get('warnings', []))}`\n\n"
@@ -166,103 +181,107 @@ class Fraktion(commands.Cog):
     @faction_group.command(name="warn", aliases=["verwarnung"])
     @commands.admin_or_permissions(manage_messages=True)
     async def faction_warn(self, ctx, faction: str, *, reason_text: str):
-        """Gibt einer Fraktion eine Verwarnung. Dauer ist optional (Standard: perm).
-        
-        Beispiele:
-            [p]fk warn LSPD FailRP beim Bankraub  (Permanent)
-            [p]fk warn LSPD 7d FailRP beim Bankraub (7 Tage)
-        """
-        factions = await self.config.factions()
-        if faction.lower() not in factions:
-            return await ctx.send("❌ Diese Fraktion existiert nicht.")
-            
-        faction_data = factions[faction.lower()]
-        
-        # Smartes Parsen: Prüft, ob das erste Wort eine Zeitdauer ist
-        parts = reason_text.split()
-        duration = "perm"
-        reason = reason_text
-        
-        if len(parts) > 1:
-            test_dur = self.parse_duration(parts[0])
-            if test_dur is not False: # Wenn es eine gültige Zeitdauer ist (oder 'perm')
-                duration = parts[0]
-                reason = " ".join(parts[1:])
+        """Gibt einer Fraktion eine Verwarnung. Dauer ist optional (Standard: perm)."""
+        try:
+            factions = await self.config.factions()
+            if faction.lower() not in factions:
+                return await ctx.send("❌ Diese Fraktion existiert nicht.")
                 
-        if not reason:
-            return await ctx.send("❌ Du musst einen Grund angeben.")
+            faction_data = factions[faction.lower()]
             
-        expires_at = self.parse_duration(duration)
-        # Da wir oben schon validiert haben, ist expires_at hier niemals False
+            # Smartes Parsen: Prüft, ob das erste Wort eine Zeitdauer ist
+            parts = reason_text.split()
+            duration = "perm"
+            reason = reason_text
             
-        warning_id = str(uuid.uuid4())[:8]
-        current_time = datetime.now()
-        current_time_str = current_time.strftime("%d.%m.%Y %H:%M")
-        expires_str = expires_at.strftime("%d.%m.%Y %H:%M") if expires_at else "Permanent"
-        
-        # Leader finden und benachrichtigen
-        guild = self.bot.get_guild(faction_data["guild_id"])
-        notified_leaders = []
-        if guild:
-            for member in guild.members:
-                if any(role.id in faction_data["leader_role_ids"] for role in member.roles):
-                    notified_leaders.append(member.mention)
+            if len(parts) > 1:
+                test_dur = self.parse_duration(parts[0])
+                if test_dur is not False:
+                    duration = parts[0]
+                    reason = " ".join(parts[1:])
+                    
+            if not reason:
+                return await ctx.send("❌ Du musst einen Grund angeben.")
+                
+            expires_at = self.parse_duration(duration)
+                
+            warning_id = str(uuid.uuid4())[:8]
+            current_time = self.get_berlin_time()
+            current_time_str = current_time.strftime("%d.%m.%Y %H:%M")
+            
+            if expires_at:
+                expires_str = expires_at.strftime("%d.%m.%Y %H:%M")
+            else:
+                expires_str = "Permanent"
+            
+            guild = self.bot.get_guild(faction_data.get("guild_id", 0))
+            notified_leaders = []
+            leader_ids = faction_data.get("leader_role_ids", [])
+            
+            if guild and leader_ids:
+                for member in guild.members:
+                    if any(role.id in leader_ids for role in member.roles):
+                        notified_leaders.append(member.mention)
+                        try:
+                            dm_embed = discord.Embed(
+                                title="⚠️ Amtliche Fraktionsverwarnung",
+                                description=f"Eure Fraktion **{faction_data.get('display_name', faction)}** hat eine Verwarnung erhalten.",
+                                color=discord.Color.red(),
+                                timestamp=current_time
+                            )
+                            dm_embed.add_field(name="🆔 Verwarnungs-ID", value=f"`{warning_id}`", inline=True)
+                            dm_embed.add_field(name="⏳ Dauer", value=f"`{expires_str}`", inline=True)
+                            dm_embed.add_field(name="📝 Begründung", value=reason, inline=False)
+                            dm_embed.set_footer(text=f"Ausgestellt durch: {ctx.author.name}")
+                            await member.send(embed=dm_embed)
+                        except Exception:
+                            pass
+            
+            async with self.config.factions() as f:
+                if "warnings" not in f[faction.lower()]:
+                    f[faction.lower()]["warnings"] = []
+                    
+                f[faction.lower()]["warnings"].append({
+                    "id": warning_id, 
+                    "reason": reason, 
+                    "moderator": ctx.author.name, 
+                    "date": current_time_str,
+                    "expires": expires_at.timestamp() if expires_at else None
+                })
+                
+            embed = discord.Embed(title="⚠️ Verwarnung ausgesprochen", color=discord.Color.red(), timestamp=current_time)
+            embed.add_field(name="Fraktion", value=faction_data.get('display_name', faction), inline=True)
+            embed.add_field(name="Warn-ID", value=warning_id, inline=True)
+            embed.add_field(name="Dauer", value=expires_str, inline=True)
+            embed.add_field(name="Grund", value=reason, inline=False)
+            
+            leaders_str = ", ".join(notified_leaders) if notified_leaders else "Keine Leader gefunden"
+            if len(leaders_str) > 1024: leaders_str = f"{len(notified_leaders)} Leader wurden per DM benachrichtigt."
+            embed.add_field(name="Benachrichtigte Leader", value=leaders_str, inline=False)
+            
+            await ctx.send(embed=embed)
+            
+            log_channel_id = await self.config.warn_log_channel()
+            if log_channel_id:
+                log_channel = self.bot.get_channel(log_channel_id)
+                if log_channel:
+                    log_embed = discord.Embed(title="🚨 Neue Fraktionsverwarnung", color=discord.Color.dark_red(), timestamp=current_time)
+                    log_embed.add_field(name="Fraktion", value=faction_data.get('display_name', faction), inline=True)
+                    log_embed.add_field(name="Warn-ID", value=warning_id, inline=True)
+                    log_embed.add_field(name="Dauer", value=expires_str, inline=True)
+                    log_embed.add_field(name="Grund", value=reason, inline=False)
+                    log_embed.set_footer(text=f"Ausgestellt von {ctx.author.name}")
                     try:
-                        # Verschönerte DM
-                        dm_embed = discord.Embed(
-                            title="⚠️ Amtliche Fraktionsverwarnung",
-                            description=f"Eure Fraktion **{faction_data['display_name']}** hat eine Verwarnung erhalten.",
-                            color=discord.Color.red()
-                        )
-                        dm_embed.add_field(name="🆔 Verwarnungs-ID", value=f"`{warning_id}`", inline=True)
-                        dm_embed.add_field(name="⏳ Dauer", value=f"`{expires_str}`", inline=True)
-                        dm_embed.add_field(name="📝 Begründung", value=reason, inline=False)
-                        dm_embed.set_footer(text=f"Ausgestellt durch: {ctx.author.name} • {current_time_str}")
-                        await member.send(embed=dm_embed)
-                    except discord.Forbidden:
+                        await log_channel.send(embed=log_embed)
+                    except:
                         pass
-        
-        # Warn in DB speichern (MIT KEYERROR SCHUTZ)
-        async with self.config.factions() as f:
-            if "warnings" not in f[faction.lower()]:
-                f[faction.lower()]["warnings"] = []
-                
-            f[faction.lower()]["warnings"].append({
-                "id": warning_id, 
-                "reason": reason, 
-                "moderator": ctx.author.name, 
-                "date": current_time_str,
-                "expires": expires_at.timestamp() if expires_at else None
-            })
-            
-        # Embed für den Ausführer
-        embed = discord.Embed(title="⚠️ Verwarnung ausgesprochen", color=discord.Color.red(), timestamp=current_time)
-        embed.add_field(name="Fraktion", value=faction_data["display_name"], inline=True)
-        embed.add_field(name="Warn-ID", value=warning_id, inline=True)
-        embed.add_field(name="Dauer", value=expires_str, inline=True)
-        embed.add_field(name="Grund", value=reason, inline=False)
-        
-        leaders_str = ", ".join(notified_leaders) if notified_leaders else "Keine Leader gefunden"
-        if len(leaders_str) > 1024: leaders_str = f"{len(notified_leaders)} Leader wurden per DM benachrichtigt."
-        embed.add_field(name="Benachrichtigte Leader", value=leaders_str, inline=False)
-        
-        await ctx.send(embed=embed)
-        
-        # In den Warn-Log Channel senden
-        log_channel_id = await self.config.warn_log_channel()
-        if log_channel_id:
-            log_channel = self.bot.get_channel(log_channel_id)
-            if log_channel:
-                log_embed = discord.Embed(title="🚨 Neue Fraktionsverwarnung", color=discord.Color.dark_red(), timestamp=current_time)
-                log_embed.add_field(name="Fraktion", value=faction_data['display_name'], inline=True)
-                log_embed.add_field(name="Warn-ID", value=warning_id, inline=True)
-                log_embed.add_field(name="Dauer", value=expires_str, inline=True)
-                log_embed.add_field(name="Grund", value=reason, inline=False)
-                log_embed.set_footer(text=f"Ausgestellt von {ctx.author.name}")
-                try:
-                    await log_channel.send(embed=log_embed)
-                except:
-                    pass
+
+        except Exception as e:
+            # Falls immer noch ein Fehler auftritt, schicken wir ihn direkt in den Discord!
+            error_msg = f"```py\n{traceback.format_exc()}\n```"
+            if len(error_msg) > 1900:
+                error_msg = error_msg[-1900:]
+            await ctx.send(f"❌ Ein interner Fehler ist aufgetreten. Bitte sende diesen Text an den Entwickler:\n{error_msg}")
 
     @faction_group.command(name="warns", aliases=["akte"])
     async def faction_warns(self, ctx, faction: str):
@@ -327,12 +346,12 @@ class Fraktion(commands.Cog):
         if faction.lower() not in factions:
             return await ctx.send("❌ Diese Fraktion existiert nicht.")
             
-        current_time = datetime.now().strftime("%d.%m.%Y")
+        current_time = self.get_berlin_time().strftime("%d.%m.%Y")
         async with self.config.user(user).blacklists() as blacklists:
             if any(b["faction"].lower() == faction.lower() for b in blacklists):
                 return await ctx.send(f"❌ {user.name} ist bereits auf der Blacklist von {faction}.")
             blacklists.append({
-                "faction": factions[faction.lower()]["display_name"],
+                "faction": factions[faction.lower()].get("display_name", faction),
                 "reason": reason, "moderator": ctx.author.name, "date": current_time
             })
         await ctx.send(f"🚫 {user.mention} wurde auf die Blacklist von **{faction}** gesetzt.\n**Grund:** {reason}")
@@ -375,7 +394,7 @@ class Fraktion(commands.Cog):
         if not self.is_faction_leader(ctx.author, faction_data):
             return await ctx.send("❌ Du bist kein Leader dieser Fraktion und darfst keine Meldungen absetzen.")
             
-        channel_id = await self.config.legal_board_channel() if faction_data["type"] == "legal" else await self.config.illegal_board_channel()
+        channel_id = await self.config.legal_board_channel() if faction_data.get("type", "legal") == "legal" else await self.config.illegal_board_channel()
         if not channel_id:
             return await ctx.send("❌ Es wurde kein Channel für das Stadtblatt / Schwarze Brett eingerichtet.")
             
@@ -384,10 +403,10 @@ class Fraktion(commands.Cog):
             return await ctx.send("❌ Der konfigurierte Channel konnte nicht gefunden werden.")
             
         embed = discord.Embed(
-            title=f"📰 Neue Meldung: {faction_data['display_name']}" if faction_data['type'] == 'legal' else f"📜 Gerücht aus der Unterwelt: {faction_data['display_name']}",
+            title=f"📰 Neue Meldung: {faction_data.get('display_name', faction)}" if faction_data.get('type') == 'legal' else f"📜 Gerücht aus der Unterwelt: {faction_data.get('display_name', faction)}",
             description=text,
-            color=discord.Color.green() if faction_data['type'] == 'legal' else discord.Color.dark_grey(),
-            timestamp=datetime.now()
+            color=discord.Color.green() if faction_data.get("type") == "legal" else discord.Color.dark_grey(),
+            timestamp=self.get_berlin_time()
         )
         embed.set_footer(text=f"Gezeichnet von {ctx.author.name}")
         
@@ -414,9 +433,10 @@ class Fraktion(commands.Cog):
             return await ctx.send("❌ Der konfigurierte Channel konnte nicht gefunden werden.")
             
         embed = discord.Embed(
-            title=f"📝 Fraktions-Update: {faction_data['display_name']}",
+            title=f"📝 Fraktions-Update: {faction_data.get('display_name', faction)}",
             description=text,
-            color=discord.Color.gold()
+            color=discord.Color.gold(),
+            timestamp=self.get_berlin_time()
         )
         embed.set_footer(text=f"Verkündet von {ctx.author.name}")
         
