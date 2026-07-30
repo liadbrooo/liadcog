@@ -54,9 +54,8 @@ class SupportSystem(commands.Cog):
                         if s_data.get("status") in ["active", "paused"]:
                             channel_id = s_data.get("channel_id")
                             user_ids = s_data.get("user_ids", [])
-                            staff_ids = s_data.get("staff_ids", [])
                             
-                            if not channel_id or not user_ids or not staff_ids:
+                            if not channel_id or not user_ids:
                                 to_end.append((session_id, "Daten unvollständig (Auto-Cleanup)"))
                                 continue
                             
@@ -65,14 +64,11 @@ class SupportSystem(commands.Cog):
                                 to_end.append((session_id, "Channel wurde gelöscht"))
                                 continue
                             
-                            # PRÜFE: Ist der Support-User noch da?
+                            # NUR PRÜFEN: Ist der Support-User noch da? (Teamler darf fehlen!)
                             users_present = any(m.id in user_ids for m in channel.members)
-                            # PRÜFE: Ist der Teamler noch da?
-                            staff_present = any(m.id in staff_ids for m in channel.members)
                             
-                            # FEHLT EINER VON BEIDEN -> SUPPORT BEENDEN
-                            if not users_present or not staff_present:
-                                to_end.append((session_id, "User oder Teamler nicht mehr im Channel"))
+                            if not users_present:
+                                to_end.append((session_id, "User hat den Channel verlassen"))
                     
                     for session_id, reason in to_end:
                         await self.end_session(guild, session_id, reason)
@@ -116,7 +112,8 @@ class SupportSystem(commands.Cog):
                     if member.nick != orig_nick:
                         await member.edit(nick=orig_nick[:32], reason="Support System Reset")
         except discord.Forbidden: pass
-        except Exception: pass
+        except Exception as e:
+            print(f"SupportSystem Nick Reset Error: {e}")
 
     async def get_mover(self, guild, target_member):
         try:
@@ -319,18 +316,16 @@ class SupportSystem(commands.Cog):
             if member.id in session["user_ids"]:
                 orig_nick = session["original_nicks"].get(str(member.id), None)
                 await self._reset_member_nick(member, orig_nick)
+                # WICHTIG: Support wird NUR beendet, wenn der USER geht!
                 needs_end = True
                     
             elif member.id in session["staff_ids"]:
                 session["staff_ids"].remove(member.id)
-                # NEU: Wenn der letzte Teamler geht, Support beenden!
-                if len(session["staff_ids"]) == 0:
-                    needs_end = True
-                else:
-                    update_info = f"{member.mention} hat den Support verlassen."
+                # WICHTIG: Wenn der Teamler geht, Support LAUFEN LASSEN!
+                update_info = f"{member.mention} hat den Support verlassen."
 
         if needs_end:
-            await self.end_session(guild, session_id, "User oder Teamler hat den Channel verlassen")
+            await self.end_session(guild, session_id, "User hat den Channel verlassen")
         elif update_info:
             await self.update_embed(guild, session_id, "Update", update_info)
 
@@ -436,7 +431,9 @@ class SupportSystem(commands.Cog):
             async with self.config.guild(guild).active_sessions() as sessions:
                 if session_id in sessions: del sessions[session_id]
             return
-        except: return
+        except Exception as e:
+            print(f"SupportSystem Fetch Error (Update): {e}")
+            return
             
         embed = msg.embeds[0]
         
@@ -471,16 +468,36 @@ class SupportSystem(commands.Cog):
         view = view_override if view_override else (SupportControlView(self) if session["status"] in ["active", "paused"] else None)
         try:
             await msg.edit(content=None, embed=embed, view=view)
-        except: pass
+        except Exception as e:
+            print(f"SupportSystem Edit Error (Update): {e}")
+
+    async def _force_close_embed(self, guild, session_id, reason="Beendet", note=None):
+        staff_channel = guild.get_channel(await self.config.guild(guild).staff_channel())
+        if not staff_channel: return
+        try:
+            msg = await staff_channel.fetch_message(int(session_id))
+            embed = msg.embeds[0]
+            embed.color = discord.Color.red()
+            embed.title = "🛑 Supportfall beendet"
+            embed.clear_fields()
+            embed.add_field(name="ℹ️ Info", value="Support wurde im Hintergrund bereits geschlossen.", inline=False)
+            embed.add_field(name="🚪 Grund", value=reason, inline=False)
+            if note:
+                embed.add_field(name="📝 Notiz", value=note, inline=False)
+            embed.set_footer(text="Beendet (Zwangs-Close)")
+            await msg.edit(content=None, embed=embed, view=None)
+        except Exception as e:
+            print(f"SupportSystem Force Close Error: {e}")
 
     async def end_session(self, guild, session_id, reason="Beendet", note=None):
         user_ids_to_kick = []
         channel_id = None
         end_time = datetime.datetime.now(datetime.timezone.utc)
         
-        # NEU: Session SOFORT aus der Config löschen, damit sie auf KEINEN Fall im Gehirn hängen bleibt.
         async with self.config.guild(guild).active_sessions() as sessions:
-            if session_id not in sessions: return False
+            if session_id not in sessions: 
+                await self._force_close_embed(guild, session_id, reason, note)
+                return False
             session = sessions[session_id]
             if session["status"] == "ended": return False
             
@@ -519,10 +536,8 @@ class SupportSystem(commands.Cog):
                     })
                     history[str(u_id)] = history[str(u_id)][-10:]
 
-            # HIER SOFORT LÖSCHEN
             del sessions[session_id]
         
-        # Ab hier ist die Session im Bot-Gehirn beendet. Die API-Calls können ruhig sein.
         for u_id in user_ids_to_kick:
             m = guild.get_member(u_id)
             if m:
@@ -563,7 +578,8 @@ class SupportSystem(commands.Cog):
                     log_c = guild.get_channel(log_c_id)
                     if log_c:
                         await log_c.send(embed=embed)
-            except: pass
+            except Exception as e:
+                print(f"SupportSystem Edit Error (End): {e}")
             
         return True
 
@@ -662,8 +678,6 @@ class SupportSystem(commands.Cog):
                         
         await ctx.send(f"✅ Alle Support-Sessions zurückgesetzt. {cleaned_count} Nicknames wurden gereinigt.")
 
-    # --- OWNER / ADMIN BEFEHLE ---
-
     @lsupportsetup.command(name="lsettings")
     async def lsettings(self, ctx: commands.Context):
         """Zeigt alle aktuellen Einstellungen des Support-Systems an."""
@@ -728,8 +742,6 @@ class SupportSystem(commands.Cog):
                         
         await ctx.send(f"✅ Globaler Cleanup beendet. {cleaned_count} Nicknames wurden repariert.")
 
-    # --- TEAMLER BEFEHLE ---
-
     @commands.command(name="lclaimnext")
     @commands.mod_or_permissions(manage_messages=True)
     async def lclaimnext(self, ctx: commands.Context):
@@ -789,8 +801,6 @@ class SupportSystem(commands.Cog):
             except: pass
             
         await ctx.send(f"✅ {count} Personen in {channel.mention} wurden entmutet.")
-
-    # --- USER BEFEHLE ---
 
     @commands.command(name="lsupportstats")
     @commands.mod_or_permissions(manage_messages=True)
@@ -1056,7 +1066,8 @@ class SupportControlView(discord.ui.View):
 
         sessions = await self.cog.config.guild(guild).active_sessions()
         if session_id not in sessions:
-            return await interaction.response.send_message("Dieser Supportfall existiert nicht mehr (wurde evtl. schon beendet).", ephemeral=True)
+            await self.cog._force_close_embed(guild, session_id, "Von Teamler beendet (war im Hintergrund schon geschlossen)")
+            return await interaction.response.send_message("Dieser Supportfall wurde im Hintergrund bereits beendet. Ich habe das Embed für dich rot gemacht.", ephemeral=True)
 
         modal = CloseNoteModal(self.cog, session_id)
         await interaction.response.send_modal(modal)
@@ -1082,7 +1093,8 @@ class CloseNoteModal(discord.ui.Modal, title="Support beenden - Notiz"):
         
         sessions = await self.cog.config.guild(guild).active_sessions()
         if self.session_id not in sessions:
-            return await interaction.response.send_message("Dieser Supportfall wurde bereits beendet (z.B. weil der User den Channel verlassen hat).", ephemeral=True)
+            await self.cog._force_close_embed(guild, self.session_id, "Von Teamler beendet (war im Hintergrund schon geschlossen)", note)
+            return await interaction.response.send_message("Support wurde im Hintergrund bereits beendet. Ich habe das Embed für dich rot gemacht.", ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
         success = await self.cog.end_session(guild, self.session_id, "Von Teamler beendet", note)
