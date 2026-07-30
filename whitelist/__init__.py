@@ -13,7 +13,8 @@ class FiveMWhitelist(commands.Cog):
             "log_channel": None,
             "wl_role": None,
             "ping_role": None,
-            "extra_wl_roles": []
+            "extra_wl_roles": [],
+            "blacklist": [] # NEU: Liste der gesperrten User-IDs
         }
         self.config.register_guild(**default_guild)
         
@@ -21,18 +22,15 @@ class FiveMWhitelist(commands.Cog):
         bot.add_view(WhitelistButtonView(self.config))
         bot.add_view(ApplicationActionsView(self.config))
 
-    # --- REPARIERTE BERECHTIGUNGS-PRÜFUNG ---
     async def check_perms(self, ctx_or_interaction) -> bool:
         user = None
         guild = None
         
-        # Fall 1: Es ist ein normaler Befehl (Context)
         if isinstance(ctx_or_interaction, commands.Context):
             user = ctx_or_interaction.author
             guild = ctx_or_interaction.guild
             if user.guild_permissions.manage_guild:
                 return True
-        # Fall 2: Es ist ein Button-Klick (Interaction)
         elif isinstance(ctx_or_interaction, discord.Interaction):
             user = ctx_or_interaction.user
             guild = ctx_or_interaction.guild
@@ -41,12 +39,10 @@ class FiveMWhitelist(commands.Cog):
         else:
             return False
 
-        # Ping Rolle prüfen
         ping_role_id = await self.config.guild(guild).ping_role()
         if ping_role_id and guild.get_role(ping_role_id) in user.roles:
             return True
             
-        # Extra Rollen prüfen
         extra_roles = await self.config.guild(guild).extra_wl_roles()
         for role_id in extra_roles:
             if guild.get_role(role_id) in user.roles:
@@ -119,6 +115,30 @@ class FiveMWhitelist(commands.Cog):
             await ctx.send(f"✅ {member.mention} wurde die Whitelist-Rolle {wl_role.mention} entfernt.")
         except discord.Forbidden:
             await ctx.send("❌ Ich habe keine Berechtigung, diese Rolle zu entfernen. Bitte prüfe meine Rollen/Rechte.")
+
+    @commands.command(name="lwb")
+    async def manual_blacklist(self, ctx: commands.Context, user_id: int):
+        """Setzt einen User auf die Blacklist, sodass er sich nicht mehr bewerben kann."""
+        if not await self.check_perms(ctx):
+            return await ctx.send("❌ Du hast keine Berechtigung, dies zu tun.", delete_after=10)
+            
+        async with self.config.guild(ctx.guild).blacklist() as blacklist:
+            if user_id not in blacklist:
+                blacklist.append(user_id)
+                
+        await ctx.send(f"✅ Der User `{user_id}` wurde auf die Blacklist gesetzt und kann sich nun nicht mehr bewerben.")
+
+    @commands.command(name="lunwb")
+    async def manual_unblacklist(self, ctx: commands.Context, user_id: int):
+        """Entfernt einen User von der Blacklist."""
+        if not await self.check_perms(ctx):
+            return await ctx.send("❌ Du hast keine Berechtigung, dies zu tun.", delete_after=10)
+            
+        async with self.config.guild(ctx.guild).blacklist() as blacklist:
+            if user_id in blacklist:
+                blacklist.remove(user_id)
+                
+        await ctx.send(f"✅ Der User `{user_id}` wurde von der Blacklist entfernt und kann sich wieder bewerben.")
 
     # --- SETUP WIZARD & SETTINGS ---
 
@@ -260,14 +280,21 @@ class WhitelistButtonView(discord.ui.View):
         super().__init__(timeout=None)
         self.config = config
 
-    @discord.ui.button(label="Bewerbung starten", style=discord.ButtonStyle.primary, custom_id="fivem_wl_start_v8", emoji="📝")
+    @discord.ui.button(label="Bewerbung starten", style=discord.ButtonStyle.primary, custom_id="fivem_wl_start_v9", emoji="📝")
     async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 1. Prüfen ob User auf der Blacklist steht
+        blacklist = await self.config.guild(interaction.guild).blacklist()
+        if interaction.user.id in blacklist:
+            return await interaction.response.send_message("❌ Du wurdest von der Bewerbung ausgeschlossen (Blacklist).", ephemeral=True)
+
+        # 2. Prüfen ob User schon WL hat
         wl_role_id = await self.config.guild(interaction.guild).wl_role()
         if wl_role_id:
             wl_role = interaction.guild.get_role(wl_role_id)
             if wl_role and wl_role in interaction.user.roles:
                 return await interaction.response.send_message("Du bist bereits gewhitelisted! 🎉", ephemeral=True)
 
+        # 3. Modal öffnen
         modal = WhitelistModal(self.config)
         await interaction.response.send_modal(modal)
 
@@ -355,7 +382,9 @@ class ApplicationActionsView(discord.ui.View):
         self.config = config
 
     async def get_applicant(self, interaction: discord.Interaction):
-        match = re.search(r"`(\d+)`", interaction.message.embeds[0].description)
+        if not interaction.message.embeds:
+            return None
+        match = re.search(r"`(\d+)`", interaction.message.embeds[0].description or "")
         if match:
             user_id = int(match.group(1))
             return interaction.guild.get_member(user_id)
@@ -376,7 +405,7 @@ class ApplicationActionsView(discord.ui.View):
                 
         return False
 
-    @discord.ui.button(label="Annehmen", style=discord.ButtonStyle.success, custom_id="fivem_wl_accept_v8", emoji="✅")
+    @discord.ui.button(label="Annehmen", style=discord.ButtonStyle.success, custom_id="fivem_wl_accept_v9", emoji="✅")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -409,7 +438,7 @@ class ApplicationActionsView(discord.ui.View):
         if dm_failed:
             await interaction.followup.send("⚠️ Der User wurde angenommen, hat aber seine **DMs gesperrt**! Bitte informiere ihn manuell.", ephemeral=True)
 
-    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="fivem_wl_reject_v8", emoji="❌")
+    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="fivem_wl_reject_v9", emoji="❌")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -421,7 +450,7 @@ class ApplicationActionsView(discord.ui.View):
         modal = RejectReasonModal(applicant, interaction.message, interaction.guild.name, interaction.user)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Rückfragen", style=discord.ButtonStyle.secondary, custom_id="fivem_wl_questions_v8", emoji="❓")
+    @discord.ui.button(label="Rückfragen", style=discord.ButtonStyle.secondary, custom_id="fivem_wl_questions_v9", emoji="❓")
     async def questions(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_perms(interaction):
             return await interaction.response.send_message("❌ Du hast keine Berechtigung, Bewerbungen zu bearbeiten.", ephemeral=True)
@@ -444,12 +473,12 @@ class ApplicationActionsView(discord.ui.View):
         embed.title = "❓ Rückfragen gestellt"
         embed.add_field(name="⚙️ Admin-Aktion", value=f"Rückfragen gestellt von: {interaction.user.mention}", inline=False)
         
-        # Nur den Rückfragen-Button deaktivieren, die anderen aktiv lassen
-        for child in self.children:
-            if child.custom_id == "fivem_wl_questions_v8":
+        new_view = ApplicationActionsView(self.config)
+        for child in new_view.children:
+            if child.custom_id == "fivem_wl_questions_v9":
                 child.disabled = True
-        
-        await interaction.response.edit_message(content=f"🔔 Rückfragen von {interaction.user.mention}", embed=embed, view=self)
+                
+        await interaction.response.edit_message(content=f"🔔 Rückfragen von {interaction.user.mention}", embed=embed, view=new_view)
 
 
 class RejectReasonModal(discord.ui.Modal, title="Grund für Ablehnung"):
@@ -475,7 +504,7 @@ class RejectReasonModal(discord.ui.Modal, title="Grund für Ablehnung"):
                 f"❌ **Bedauerlicherweise...**\n"
                 f"Deine Whitelist-Bewerbung auf **{self.guild_name}** wurde leider abgelehnt.\n\n"
                 f"**Grund:** {self.reason.value}\n\n"
-                f"Du kannst es in 14 Tagen erneut versuchen."
+                f"Du kannst es gerne erneut versuchen."
             )
         except discord.Forbidden:
             dm_failed = True
