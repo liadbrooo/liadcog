@@ -64,7 +64,6 @@ class SupportSystem(commands.Cog):
                                 to_end.append((session_id, "Channel wurde gelöscht"))
                                 continue
                             
-                            # NUR PRÜFEN: Ist der Support-User noch da? (Teamler darf fehlen!)
                             users_present = any(m.id in user_ids for m in channel.members)
                             
                             if not users_present:
@@ -256,6 +255,12 @@ class SupportSystem(commands.Cog):
             orig_nick = sessions[session_id].get("original_nicks", {}).get(str(member.id), None)
             await self._reset_member_nick(member, orig_nick)
 
+        # FIX: IMMER den Server-Mute entfernen, wenn der Warteraum verlassen wird!
+        try:
+            await member.edit(mute=False, reason="Warteraum verlassen")
+        except discord.Forbidden: pass
+        except Exception: pass
+
         if after_channel and after_channel.id != await self.config.guild(guild).waitroom():
             claimer_id = await self.get_mover(guild, member)
             
@@ -316,12 +321,10 @@ class SupportSystem(commands.Cog):
             if member.id in session["user_ids"]:
                 orig_nick = session["original_nicks"].get(str(member.id), None)
                 await self._reset_member_nick(member, orig_nick)
-                # WICHTIG: Support wird NUR beendet, wenn der USER geht!
                 needs_end = True
                     
             elif member.id in session["staff_ids"]:
                 session["staff_ids"].remove(member.id)
-                # WICHTIG: Wenn der Teamler geht, Support LAUFEN LASSEN!
                 update_info = f"{member.mention} hat den Support verlassen."
 
         if needs_end:
