@@ -1,11 +1,11 @@
 """
-Cog: Vollständiger Setup-Assistent (final & stabil)
+Cog: Vollständiger Setup-Assistent (robust & fehlerresistent)
 - Fortschrittsbalken
 - Setup speichern und fortsetzen
-- Live-Vorschau (Farbe & Prefix)
+- Live-Vorschau
 - Zwischen Schritten springen
 - Deutsch / Englisch
-- Einstellungen exportieren & importieren
+- Export & Import
 """
 import discord
 from redbot.core import commands, Config
@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, List
 import asyncio
 import json
 import io
+import traceback
 
 # -------------------------------------------------------------------
 # Mehrsprachige Textbausteine
@@ -143,7 +144,6 @@ TEXTS = {
     },
 }
 
-
 # -------------------------------------------------------------------
 # Haupt-Cog
 # -------------------------------------------------------------------
@@ -155,12 +155,12 @@ class SetupWizardCog(commands.Cog):
         self.config = Config.get_conf(self, identifier=1642872399, force_registration=True)
         default_guild = {
             "setup_in_progress": False,
-            "saved_setup": None,  # dict mit "data" und "step"
+            "saved_setup": None,
         }
         self.config.register_guild(**default_guild)
 
-    # Hilfsmethode für Texte – verwendet nur die übergebene locale
-    def t(self, locale: str, key: str, **kwargs) -> str:
+    @staticmethod
+    def t(locale: str, key: str, **kwargs) -> str:
         texts = TEXTS.get(locale, TEXTS["en-US"])
         return texts.get(key, TEXTS["en-US"][key]).format(**kwargs)
 
@@ -169,41 +169,39 @@ class SetupWizardCog(commands.Cog):
     @commands.has_permissions(manage_guild=True)
     async def setup(self, ctx: commands.Context):
         """Startet den interaktiven Einrichtungsassistenten."""
-        if await self.config.guild(ctx.guild).setup_in_progress():
-            await ctx.send("A setup is already running on this server.")
-            return
+        try:
+            if await self.config.guild(ctx.guild).setup_in_progress():
+                await ctx.send("A setup is already running on this server.")
+                return
 
-        # Prüfen, ob gespeichertes Setup existiert
-        saved = await self.config.guild(ctx.guild).saved_setup()
-        if saved:
-            await self.config.guild(ctx.guild).setup_in_progress.set(True)
-            embed = discord.Embed(
-                title=self.t(saved.get("data", {}).get("locale", "en-US"), "resume_title"),
-                description=self.t(saved.get("data", {}).get("locale", "en-US"), "resume_desc"),
-                color=discord.Color.blue(),
-            )
-            view = ResumeView(self, ctx.author, ctx.guild, saved)
-            message = await ctx.send(embed=embed, view=view)
-            view.message = message
-            return
+            saved = await self.config.guild(ctx.guild).saved_setup()
+            if saved:
+                await self.config.guild(ctx.guild).setup_in_progress.set(True)
+                embed = discord.Embed(
+                    title=self.t(saved.get("data", {}).get("locale", "en-US"), "resume_title"),
+                    description=self.t(saved.get("data", {}).get("locale", "en-US"), "resume_desc"),
+                    color=discord.Color.blue(),
+                )
+                view = ResumeView(self, ctx.author, ctx.guild, saved)
+                message = await ctx.send(embed=embed, view=view)
+                view.message = message
+                return
 
-        await self.start_fresh_setup(ctx)
+            await self.start_fresh_setup(ctx)
+        except Exception as e:
+            await ctx.send(f"❌ Fehler im Setup-Befehl: {e}\n```py\n{traceback.format_exc()[:1500]}\n```")
 
     async def start_fresh_setup(self, source):
-        """Startet ein neues Setup (sowohl von Context als auch von Interaction aus)."""
         if isinstance(source, commands.Context):
             guild = source.guild
             author = source.author
             send = source.send
         else:
-            # Interaction
             guild = source.guild
             author = source.user
             send = source.channel.send
 
         await self.config.guild(guild).setup_in_progress.set(True)
-
-        # Sprache aus aktuellen Daten holen
         data = await DataCollector(self, guild).collect_all()
         locale = data.get("locale", "en-US")
 
@@ -228,35 +226,36 @@ class SetupWizardCog(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
     async def export_setup(self, ctx: commands.Context):
-        """Exportiert die aktuellen Servereinstellungen als JSON-Datei."""
-        data = await DataCollector(self, ctx.guild).collect_all()
-        for key in ["embed_color", "use_bot_color"]:
-            if isinstance(data.get(key), discord.Color):
-                data[key] = data[key].value
-        json_str = json.dumps(data, indent=4, default=str)
-        file = discord.File(io.StringIO(json_str), filename="server_config.json")
-        await ctx.send(self.t(data.get("locale", "en-US"), "export_sent"), file=file)
+        try:
+            data = await DataCollector(self, ctx.guild).collect_all()
+            for key in ["embed_color", "use_bot_color"]:
+                if isinstance(data.get(key), discord.Color):
+                    data[key] = data[key].value
+            json_str = json.dumps(data, indent=4, default=str)
+            file = discord.File(io.StringIO(json_str), filename="server_config.json")
+            await ctx.send(self.t(data.get("locale", "en-US"), "export_sent"), file=file)
+        except Exception as e:
+            await ctx.send(f"❌ Export fehlgeschlagen: {e}")
 
     @commands.command(name="importsetup")
     @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
     async def import_setup(self, ctx: commands.Context):
-        """Importiert Servereinstellungen aus einer JSON-Datei (als Anhang)."""
         if not ctx.message.attachments:
-            await ctx.send("Please attach a .json file.")
-            return
+            return await ctx.send("Please attach a .json file.")
         attachment = ctx.message.attachments[0]
         try:
             content = await attachment.read()
             data = json.loads(content)
         except Exception:
-            await ctx.send(self.t("en-US", "import_fail"))
-            return
+            return await ctx.send(self.t("en-US", "import_fail"))
         if not isinstance(data, dict):
-            await ctx.send(self.t("en-US", "import_fail"))
-            return
-        await self._apply_imported_settings(ctx.guild, data)
-        await ctx.send(self.t(data.get("locale", "en-US"), "import_success"))
+            return await ctx.send(self.t("en-US", "import_fail"))
+        try:
+            await self._apply_imported_settings(ctx.guild, data)
+            await ctx.send(self.t(data.get("locale", "en-US"), "import_success"))
+        except Exception as e:
+            await ctx.send(f"❌ Import fehlgeschlagen: {e}")
 
     async def _apply_imported_settings(self, guild: discord.Guild, data: dict):
         core_conf = self.bot.core_config
@@ -282,7 +281,6 @@ class SetupWizardCog(commands.Cog):
         if logs_cog:
             await logs_cog.config.guild(guild).serverlog_channel.set(data.get("serverlog_channel"))
             await logs_cog.config.guild(guild).messagelog_channel.set(data.get("messagelog_channel"))
-
 
 # -------------------------------------------------------------------
 # Daten-Helfer
@@ -311,7 +309,7 @@ class DataCollector:
             "dm_on_ban": False,
             "auto_mod": {},
         }
-        core_conf = self.bot.core_config if hasattr(self.bot, "core_config") else None
+        core_conf = getattr(self.bot, "core_config", None)
         if core_conf:
             data["prefix"] = await core_conf.guild(self.guild).prefix()
             data["locale"] = await core_conf.guild(self.guild).locale()
@@ -320,8 +318,11 @@ class DataCollector:
             data["embeds_disabled"] = await core_conf.guild(self.guild).embeds_disabled()
             data["admin_role"] = await core_conf.guild(self.guild).admin_role()
             data["mod_role"] = await core_conf.guild(self.guild).mod_role()
-            color = await core_conf.guild(self.guild).embed_color()
-            data["embed_color"] = color.value if isinstance(color, discord.Color) else color
+            try:
+                color = await core_conf.guild(self.guild).embed_color()
+                data["embed_color"] = color.value if isinstance(color, discord.Color) else color
+            except:
+                data["embed_color"] = None
         mod_cog = self.bot.get_cog("Mod")
         if mod_cog:
             data["modlog_channel"] = await mod_cog.config.guild(self.guild).modlog_channel()
@@ -335,9 +336,8 @@ class DataCollector:
             data["messagelog_channel"] = await logs_cog.config.guild(self.guild).messagelog_channel()
         return data
 
-
 # -------------------------------------------------------------------
-# Basis-View mit Text, Fortschritt und Sprungfunktion
+# Basis-View
 # -------------------------------------------------------------------
 class BaseStepView(View):
     step_number = 1
@@ -359,8 +359,7 @@ class BaseStepView(View):
         return True
 
     def t(self, key: str, **kwargs) -> str:
-        texts = TEXTS.get(self.locale, TEXTS["en-US"])
-        return texts.get(key, TEXTS["en-US"][key]).format(**kwargs)
+        return SetupWizardCog.t(self.locale, key, **kwargs)
 
     def progress_bar(self) -> str:
         filled = int(self.step_number / self.total_steps * 10)
@@ -381,13 +380,7 @@ class BaseStepView(View):
         await interaction.response.edit_message(embed=embed, view=prev_view)
 
     async def jump_to_step(self, interaction: discord.Interaction, step_index: int):
-        step_map = {
-            1: Step1GeneralView,
-            2: Step2RolesView,
-            3: Step3LogsView,
-            4: Step4ModerationView,
-            5: Step5FinalView,
-        }
+        step_map = {1: Step1GeneralView, 2: Step2RolesView, 3: Step3LogsView, 4: Step4ModerationView, 5: Step5FinalView}
         view_class = step_map.get(step_index)
         if view_class:
             new_view = view_class(self.cog, self.author, self.guild, self.data, self.message)
@@ -404,7 +397,6 @@ class BaseStepView(View):
             await self.message.edit(view=None)
         except discord.NotFound:
             pass
-
 
 # -------------------------------------------------------------------
 # Resume-View
@@ -426,21 +418,14 @@ class ResumeView(View):
         return True
 
     def t(self, key, **kwargs):
-        texts = TEXTS.get(self.locale, TEXTS["en-US"])
-        return texts.get(key, TEXTS["en-US"][key]).format(**kwargs)
+        return SetupWizardCog.t(self.locale, key, **kwargs)
 
     @discord.ui.button(label="Fortsetzen", style=discord.ButtonStyle.green)
     async def resume(self, interaction: discord.Interaction, button: Button):
         await self.cog.config.guild(self.guild).saved_setup.clear()
         data = self.saved["data"]
         step = self.saved["step"]
-        step_map = {
-            1: Step1GeneralView,
-            2: Step2RolesView,
-            3: Step3LogsView,
-            4: Step4ModerationView,
-            5: Step5FinalView,
-        }
+        step_map = {1: Step1GeneralView, 2: Step2RolesView, 3: Step3LogsView, 4: Step4ModerationView, 5: Step5FinalView}
         view_class = step_map.get(step, Step1GeneralView)
         view = view_class(self.cog, self.author, self.guild, data, self.message)
         embed = view.build_embed()
@@ -451,9 +436,8 @@ class ResumeView(View):
         await self.cog.config.guild(self.guild).saved_setup.clear()
         await self.cog.start_fresh_setup(interaction)
 
-
 # -------------------------------------------------------------------
-# Start-View (frischer Start)
+# Start-View
 # -------------------------------------------------------------------
 class StartView(View):
     def __init__(self, cog: SetupWizardCog, author: discord.Member, guild: discord.Guild, data: dict):
@@ -463,7 +447,6 @@ class StartView(View):
         self.guild = guild
         self.message: Optional[discord.Message] = None
         self.data = data
-        self.locale = data.get("locale", "en-US")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
@@ -480,7 +463,6 @@ class StartView(View):
     async def on_timeout(self):
         await self.cog.config.guild(self.guild).setup_in_progress.set(False)
 
-
 # -------------------------------------------------------------------
 # Schritt 1: Allgemein
 # -------------------------------------------------------------------
@@ -489,30 +471,14 @@ class Step1GeneralView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.add_item(PrefixButton(self.t("general_prefix")))
-        self.add_item(LocaleSelect(self))
-        self.add_item(ColorButton(self.t("general_color")))
-        self.add_item(RegionalFormatSelect(self))
-        self.add_item(JumpSelect(self))
-        self.add_item(Button(label=self.t("next"), style=discord.ButtonStyle.green, row=2))
-        self.children[0].callback = self.prefix_callback
-        self.children[1].callback = self.locale_callback
-        self.children[2].callback = self.color_callback
-        self.children[3].callback = self.regional_callback
-        self.children[4].callback = self.jump_callback
-        self.children[5].callback = self.next_step
+        # Erstelle Komponenten direkt mit Callbacks
+        btn_prefix = Button(label=self.t("general_prefix"), style=discord.ButtonStyle.primary)
+        btn_prefix.callback = self.prefix_callback
+        self.add_item(btn_prefix)
 
-    class PrefixButton(Button):
-        def __init__(self, label):
-            super().__init__(label=label, style=discord.ButtonStyle.primary)
-
-    async def prefix_callback(self, interaction: discord.Interaction):
-        modal = PrefixModal(self)
-        await interaction.response.send_modal(modal)
-
-    class LocaleSelect(Select):
-        def __init__(self, parent):
-            opts = [
+        sel_locale = Select(
+            placeholder="Sprache / Language",
+            options=[
                 discord.SelectOption(label="Deutsch", value="de"),
                 discord.SelectOption(label="English (US)", value="en-US"),
                 discord.SelectOption(label="English (UK)", value="en-GB"),
@@ -520,90 +486,88 @@ class Step1GeneralView(BaseStepView):
                 discord.SelectOption(label="Español", value="es"),
                 discord.SelectOption(label="Italiano", value="it"),
             ]
-            super().__init__(placeholder="Sprache / Language", options=opts, min_values=1, max_values=1)
+        )
+        sel_locale.callback = self.locale_callback
+        self.add_item(sel_locale)
 
-    async def locale_callback(self, interaction: discord.Interaction):
-        self.locale = interaction.data["values"][0]
-        self.data["locale"] = self.locale
-        embed = self.build_embed()
-        await interaction.response.edit_message(embed=embed, view=self)
+        btn_color = Button(label=self.t("general_color"), style=discord.ButtonStyle.primary)
+        btn_color.callback = self.color_callback
+        self.add_item(btn_color)
 
-    class ColorButton(Button):
-        def __init__(self, label):
-            super().__init__(label=label, style=discord.ButtonStyle.primary)
-
-    async def color_callback(self, interaction: discord.Interaction):
-        modal = ColorModal(self)
-        await interaction.response.send_modal(modal)
-
-    class RegionalFormatSelect(Select):
-        def __init__(self, parent):
-            opts = [
+        sel_format = Select(
+            placeholder="Datumsformat",
+            options=[
                 discord.SelectOption(label="Deutschland (TT.MM.JJJJ)", value="de"),
                 discord.SelectOption(label="USA (MM/TT/JJJJ)", value="en-US"),
                 discord.SelectOption(label="UK (TT/MM/JJJJ)", value="en-GB"),
                 discord.SelectOption(label="Frankreich (JJJJ-MM-TT)", value="fr"),
             ]
-            super().__init__(placeholder="Datumsformat", options=opts, min_values=1, max_values=1)
+        )
+        sel_format.callback = self.regional_callback
+        self.add_item(sel_format)
+
+        # Jump-Select
+        jump_options = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_options)
+        sel_jump.callback = self.jump_callback
+        self.add_item(sel_jump)
+
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=2)
+        btn_next.callback = self.next_step
+        self.add_item(btn_next)
+
+    async def prefix_callback(self, interaction: discord.Interaction):
+        modal = PrefixModal(self)
+        await interaction.response.send_modal(modal)
+
+    async def locale_callback(self, interaction: discord.Interaction):
+        self.locale = interaction.data["values"][0]
+        self.data["locale"] = self.locale
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def color_callback(self, interaction: discord.Interaction):
+        modal = ColorModal(self)
+        await interaction.response.send_modal(modal)
 
     async def regional_callback(self, interaction: discord.Interaction):
         self.data["regional_format"] = interaction.data["values"][0]
-        embed = self.build_embed()
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    class JumpSelect(Select):
-        def __init__(self, parent):
-            opts = []
-            for i, name in enumerate(TEXTS[parent.locale]["step_names"], 1):
-                opts.append(discord.SelectOption(label=f"{i}. {name}", value=str(i)))
-            super().__init__(placeholder=parent.t("jump_to"), options=opts, min_values=1, max_values=1)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def jump_callback(self, interaction: discord.Interaction):
         step = int(interaction.data["values"][0])
         await self.jump_to_step(interaction, step)
 
-    async def next_step(self, interaction: discord.Interaction, button: Button):
+    async def next_step(self, interaction: discord.Interaction):
         await self.go_to_next(interaction, Step2RolesView)
 
     def build_embed(self) -> discord.Embed:
         prefix = self.data.get("prefix", "!")
-        color_hex = "#{:06x}".format(self.data.get("embed_color", 0)) if isinstance(self.data.get("embed_color"), int) else "Default"
+        color_hex = f"#{self.data.get('embed_color'):06x}" if isinstance(self.data.get("embed_color"), int) else "Default"
         locale_name = {"de": "Deutsch", "en-US": "English (US)", "en-GB": "English (UK)", "fr": "Français", "es": "Español", "it": "Italiano"}.get(self.data.get("locale"), "?")
         format_name = {"de": "TT.MM.JJJJ", "en-US": "MM/TT/JJJJ", "en-GB": "TT/MM/JJJJ", "fr": "JJJJ-MM-TT"}.get(self.data.get("regional_format"), "?")
         embed = discord.Embed(
             title=self.t("general_title"),
-            description=f"{self.t('general_current_prefix', prefix=prefix)}\n"
-                        f"{self.t('general_current_locale', locale=locale_name)}\n"
-                        f"{self.t('general_current_format', format=format_name)}\n"
-                        f"{self.t('general_current_color', color=color_hex)}\n\n"
-                        f"{self.t('general_example', prefix=prefix)}",
+            description=f"{self.t('general_current_prefix', prefix=prefix)}\n{self.t('general_current_locale', locale=locale_name)}\n{self.t('general_current_format', format=format_name)}\n{self.t('general_current_color', color=color_hex)}\n\n{self.t('general_example', prefix=prefix)}",
             color=discord.Color.blue(),
         )
         embed.set_footer(text=f"{self.t('progress_bar')} {self.progress_bar()}")
         return embed
 
-
 class PrefixModal(Modal, title="Prefix setzen"):
     prefix_input = TextInput(label="Prefix", placeholder="z.B. ? oder $", required=True, max_length=10)
-
     def __init__(self, view):
         super().__init__()
         self.view = view
-
     async def on_submit(self, interaction: discord.Interaction):
         self.view.data["prefix"] = self.prefix_input.value.strip()
         await interaction.response.send_message("✅ Prefix updated.", ephemeral=True)
-        embed = self.view.build_embed()
-        await self.view.message.edit(embed=embed, view=self.view)
-
+        await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 class ColorModal(Modal, title="Embed-Farbe festlegen"):
     color_input = TextInput(label="Farbe (Hex)", placeholder="#ff0000", required=False, max_length=7)
-
     def __init__(self, view):
         super().__init__()
         self.view = view
-
     async def on_submit(self, interaction: discord.Interaction):
         raw = self.color_input.value.strip()
         if not raw:
@@ -618,48 +582,41 @@ class ColorModal(Modal, title="Embed-Farbe festlegen"):
                 await interaction.response.send_message("❌ Invalid hex.", ephemeral=True)
                 return
         await interaction.response.send_message("✅ Color updated.", ephemeral=True)
-        embed = self.view.build_embed()
-        await self.view.message.edit(embed=embed, view=self.view)
-
+        await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 # -------------------------------------------------------------------
-# Schritt 2: Rollen
+# Schritt 2: Rollen (robuster Aufbau)
 # -------------------------------------------------------------------
 class Step2RolesView(BaseStepView):
     step_number = 2
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.add_item(AdminRoleSelect(self))
-        self.add_item(ModRoleSelect(self))
+        # Admin
+        sel_admin = Select(placeholder="Admin-Rolle", options=self._role_options())
+        sel_admin.callback = self.admin_select
+        self.add_item(sel_admin)
+        # Mod
+        sel_mod = Select(placeholder="Mod-Rolle", options=self._role_options())
+        sel_mod.callback = self.mod_select
+        self.add_item(sel_mod)
+        # Mute (falls vorhanden)
         if "mute_role" in self.data:
-            self.add_item(MuteRoleSelect(self))
-        self.add_item(JumpSelect(self))
-        self.add_item(Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1))
-        self.add_item(Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1))
-        child_idx = 0
-        self.children[child_idx].callback = self.admin_select; child_idx += 1
-        self.children[child_idx].callback = self.mod_select; child_idx += 1
-        if "mute_role" in self.data:
-            self.children[child_idx].callback = self.mute_select; child_idx += 1
-        self.children[child_idx].callback = self.jump_callback; child_idx += 1
-        self.children[child_idx].callback = self.prev_step; child_idx += 1
-        self.children[child_idx].callback = self.next_step
-
-    class AdminRoleSelect(Select):
-        def __init__(self, parent):
-            opts = parent._role_options()
-            super().__init__(placeholder="Admin-Rolle", options=opts, min_values=1, max_values=1)
-
-    class ModRoleSelect(Select):
-        def __init__(self, parent):
-            opts = parent._role_options()
-            super().__init__(placeholder="Mod-Rolle", options=opts, min_values=1, max_values=1)
-
-    class MuteRoleSelect(Select):
-        def __init__(self, parent):
-            opts = parent._role_options()
-            super().__init__(placeholder="Mute-Rolle", options=opts, min_values=1, max_values=1)
+            sel_mute = Select(placeholder="Mute-Rolle", options=self._role_options())
+            sel_mute.callback = self.mute_select
+            self.add_item(sel_mute)
+        # Jump
+        jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
+        sel_jump.callback = self.jump_callback
+        self.add_item(sel_jump)
+        # Zurück/Weiter
+        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
+        btn_back.callback = self.prev_step
+        self.add_item(btn_back)
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1)
+        btn_next.callback = self.next_step
+        self.add_item(btn_next)
 
     def _role_options(self):
         opts = [discord.SelectOption(label=self.t("roles_none"), value="none")]
@@ -668,36 +625,19 @@ class Step2RolesView(BaseStepView):
                 opts.append(discord.SelectOption(label=role.name, value=str(role.id)))
         return opts
 
-    async def admin_select(self, interaction: discord.Interaction):
+    async def admin_select(self, interaction): await self._role_select(interaction, "admin_role")
+    async def mod_select(self, interaction): await self._role_select(interaction, "mod_role")
+    async def mute_select(self, interaction): await self._role_select(interaction, "mute_role")
+    async def _role_select(self, interaction, key):
         val = interaction.data["values"][0]
-        self.data["admin_role"] = None if val == "none" else int(val)
+        self.data[key] = None if val == "none" else int(val)
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    async def mod_select(self, interaction: discord.Interaction):
-        val = interaction.data["values"][0]
-        self.data["mod_role"] = None if val == "none" else int(val)
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    async def mute_select(self, interaction: discord.Interaction):
-        val = interaction.data["values"][0]
-        self.data["mute_role"] = None if val == "none" else int(val)
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    class JumpSelect(Select):
-        def __init__(self, parent):
-            opts = []
-            for i, name in enumerate(TEXTS[parent.locale]["step_names"], 1):
-                opts.append(discord.SelectOption(label=f"{i}. {name}", value=str(i)))
-            super().__init__(placeholder=parent.t("jump_to"), options=opts, min_values=1, max_values=1)
-
-    async def jump_callback(self, interaction: discord.Interaction):
-        step = int(interaction.data["values"][0])
-        await self.jump_to_step(interaction, step)
-
-    async def prev_step(self, interaction: discord.Interaction, button: Button):
+    async def jump_callback(self, interaction):
+        await self.jump_to_step(interaction, int(interaction.data["values"][0]))
+    async def prev_step(self, interaction, button):
         await self.go_to_previous(interaction, Step1GeneralView)
-
-    async def next_step(self, interaction: discord.Interaction, button: Button):
+    async def next_step(self, interaction, button):
         await self.go_to_next(interaction, Step3LogsView)
 
     def build_embed(self) -> discord.Embed:
@@ -713,44 +653,37 @@ class Step2RolesView(BaseStepView):
         return embed
 
     def _role_mention(self, rid):
-        if not rid:
-            return self.t("roles_none")
+        if not rid: return self.t("roles_none")
         role = self.guild.get_role(rid)
         return role.mention if role else "❌"
 
-
 # -------------------------------------------------------------------
-# Schritt 3: Logs
+# Schritt 3: Logs (gleiche Struktur)
 # -------------------------------------------------------------------
 class Step3LogsView(BaseStepView):
     step_number = 3
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.add_item(ModLogSelect(self))
-        self.add_item(ServerLogSelect(self))
-        self.add_item(MessageLogSelect(self))
-        self.add_item(JumpSelect(self))
-        self.add_item(Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1))
-        self.add_item(Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1))
-        self.children[0].callback = self.modlog_cb
-        self.children[1].callback = self.serverlog_cb
-        self.children[2].callback = self.messagelog_cb
-        self.children[3].callback = self.jump_callback
-        self.children[4].callback = self.prev_step
-        self.children[5].callback = self.next_step
-
-    class ModLogSelect(Select):
-        def __init__(self, parent):
-            super().__init__(placeholder="Mod-Log", options=parent._channel_opts(), min_values=1, max_values=1)
-
-    class ServerLogSelect(Select):
-        def __init__(self, parent):
-            super().__init__(placeholder="Server-Log", options=parent._channel_opts(), min_values=1, max_values=1)
-
-    class MessageLogSelect(Select):
-        def __init__(self, parent):
-            super().__init__(placeholder="Nachrichten-Log", options=parent._channel_opts(), min_values=1, max_values=1)
+        sel_modlog = Select(placeholder="Mod-Log", options=self._channel_opts())
+        sel_modlog.callback = self.modlog_cb
+        self.add_item(sel_modlog)
+        sel_serverlog = Select(placeholder="Server-Log", options=self._channel_opts())
+        sel_serverlog.callback = self.serverlog_cb
+        self.add_item(sel_serverlog)
+        sel_messagelog = Select(placeholder="Nachrichten-Log", options=self._channel_opts())
+        sel_messagelog.callback = self.messagelog_cb
+        self.add_item(sel_messagelog)
+        jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
+        sel_jump.callback = self.jump_callback
+        self.add_item(sel_jump)
+        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
+        btn_back.callback = self.prev_step
+        self.add_item(btn_back)
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1)
+        btn_next.callback = self.next_step
+        self.add_item(btn_next)
 
     def _channel_opts(self):
         opts = [discord.SelectOption(label=self.t("roles_none"), value="none")]
@@ -759,22 +692,11 @@ class Step3LogsView(BaseStepView):
                 opts.append(discord.SelectOption(label=f"#{ch.name}", value=str(ch.id)))
         return opts
 
-    async def modlog_cb(self, interaction): self.data["modlog_channel"] = self._resolve_ch(interaction); await self.update(interaction)
-    async def serverlog_cb(self, interaction): self.data["serverlog_channel"] = self._resolve_ch(interaction); await self.update(interaction)
-    async def messagelog_cb(self, interaction): self.data["messagelog_channel"] = self._resolve_ch(interaction); await self.update(interaction)
-
-    def _resolve_ch(self, interaction):
-        val = interaction.data["values"][0]
-        return None if val == "none" else int(val)
-
+    async def modlog_cb(self, interaction): self.data["modlog_channel"] = self._resolve(interaction); await self.update(interaction)
+    async def serverlog_cb(self, interaction): self.data["serverlog_channel"] = self._resolve(interaction); await self.update(interaction)
+    async def messagelog_cb(self, interaction): self.data["messagelog_channel"] = self._resolve(interaction); await self.update(interaction)
+    def _resolve(self, interaction): return None if interaction.data["values"][0] == "none" else int(interaction.data["values"][0])
     async def update(self, interaction): await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    class JumpSelect(Select):
-        def __init__(self, parent):
-            opts = []
-            for i, name in enumerate(TEXTS[parent.locale]["step_names"], 1):
-                opts.append(discord.SelectOption(label=f"{i}. {name}", value=str(i)))
-            super().__init__(placeholder=parent.t("jump_to"), options=opts, min_values=1, max_values=1)
 
     async def jump_callback(self, interaction): await self.jump_to_step(interaction, int(interaction.data["values"][0]))
     async def prev_step(self, interaction, button): await self.go_to_previous(interaction, Step2RolesView)
@@ -784,17 +706,17 @@ class Step3LogsView(BaseStepView):
         modlog = self._ch_mention(self.data.get("modlog_channel"))
         srvlog = self._ch_mention(self.data.get("serverlog_channel"))
         msglog = self._ch_mention(self.data.get("messagelog_channel"))
-        embed = discord.Embed(title=self.t("logs_title"),
-                              description=f"**{self.t('logs_modlog')}:** {modlog}\n**{self.t('logs_serverlog')}:** {srvlog}\n**{self.t('logs_messagelog')}:** {msglog}",
-                              color=discord.Color.blue())
+        embed = discord.Embed(
+            title=self.t("logs_title"),
+            description=f"**{self.t('logs_modlog')}:** {modlog}\n**{self.t('logs_serverlog')}:** {srvlog}\n**{self.t('logs_messagelog')}:** {msglog}",
+            color=discord.Color.blue(),
+        )
         embed.set_footer(text=f"{self.t('progress_bar')} {self.progress_bar()}")
         return embed
-
     def _ch_mention(self, cid):
         if not cid: return self.t("roles_none")
         ch = self.guild.get_channel(cid)
         return ch.mention if ch else "❌"
-
 
 # -------------------------------------------------------------------
 # Schritt 4: Moderation
@@ -804,151 +726,99 @@ class Step4ModerationView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.add_item(DmKickBtn(self))
-        self.add_item(DmBanBtn(self))
-        self.add_item(AutoModBtn(self))
-        self.add_item(JumpSelect(self))
-        self.add_item(Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1))
-        self.add_item(Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1))
-        self.children[0].callback = self.toggle_kick
-        self.children[1].callback = self.toggle_ban
-        self.children[2].callback = self.auto_mod_modal
-        self.children[3].callback = self.jump_callback
-        self.children[4].callback = self.prev_step
-        self.children[5].callback = self.next_step
-
-    class DmKickBtn(Button):
-        def __init__(self, parent):
-            state = parent.data.get("dm_on_kick")
-            label = f"{parent.t('mod_dm_kick')}: {parent.t('on') if state else parent.t('off')}"
-            super().__init__(label=label, style=discord.ButtonStyle.secondary)
-
-    class DmBanBtn(Button):
-        def __init__(self, parent):
-            state = parent.data.get("dm_on_ban")
-            label = f"{parent.t('mod_dm_ban')}: {parent.t('on') if state else parent.t('off')}"
-            super().__init__(label=label, style=discord.ButtonStyle.secondary)
-
-    class AutoModBtn(Button):
-        def __init__(self, parent):
-            super().__init__(label=parent.t("mod_auto"), style=discord.ButtonStyle.primary)
+        btn_kick = Button(label=f"{self.t('mod_dm_kick')}: {self.t('on') if self.data.get('dm_on_kick') else self.t('off')}", style=discord.ButtonStyle.secondary)
+        btn_kick.callback = self.toggle_kick
+        self.add_item(btn_kick)
+        btn_ban = Button(label=f"{self.t('mod_dm_ban')}: {self.t('on') if self.data.get('dm_on_ban') else self.t('off')}", style=discord.ButtonStyle.secondary)
+        btn_ban.callback = self.toggle_ban
+        self.add_item(btn_ban)
+        btn_auto = Button(label=self.t("mod_auto"), style=discord.ButtonStyle.primary)
+        btn_auto.callback = self.auto_mod_modal
+        self.add_item(btn_auto)
+        jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
+        sel_jump.callback = self.jump_callback
+        self.add_item(sel_jump)
+        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
+        btn_back.callback = self.prev_step
+        self.add_item(btn_back)
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1)
+        btn_next.callback = self.next_step
+        self.add_item(btn_next)
 
     async def toggle_kick(self, interaction):
         self.data["dm_on_kick"] = not self.data.get("dm_on_kick")
         await self.refresh(interaction)
-
     async def toggle_ban(self, interaction):
         self.data["dm_on_ban"] = not self.data.get("dm_on_ban")
         await self.refresh(interaction)
-
     async def auto_mod_modal(self, interaction):
-        modal = AutoModModal(self)
-        await interaction.response.send_modal(modal)
-
+        await interaction.response.send_modal(AutoModModal(self))
     async def refresh(self, interaction):
         new_view = Step4ModerationView(self.cog, self.author, self.guild, self.data, self.message)
-        embed = new_view.build_embed()
-        await interaction.response.edit_message(embed=embed, view=new_view)
-
-    class JumpSelect(Select):
-        def __init__(self, parent):
-            opts = []
-            for i, name in enumerate(TEXTS[parent.locale]["step_names"], 1):
-                opts.append(discord.SelectOption(label=f"{i}. {name}", value=str(i)))
-            super().__init__(placeholder=parent.t("jump_to"), options=opts, min_values=1, max_values=1)
-
+        await interaction.response.edit_message(embed=new_view.build_embed(), view=new_view)
     async def jump_callback(self, interaction): await self.jump_to_step(interaction, int(interaction.data["values"][0]))
     async def prev_step(self, interaction, button): await self.go_to_previous(interaction, Step3LogsView)
     async def next_step(self, interaction, button): await self.go_to_next(interaction, Step5FinalView)
 
     def build_embed(self):
-        embed = discord.Embed(title=self.t("mod_title"),
-                              description=f"**{self.t('mod_dm_kick')}:** {self.t('on') if self.data.get('dm_on_kick') else self.t('off')}\n"
-                                          f"**{self.t('mod_dm_ban')}:** {self.t('on') if self.data.get('dm_on_ban') else self.t('off')}\n"
-                                          f"**{self.t('mod_auto')}:** {'Konfiguriert' if self.data.get('auto_mod') else 'Deaktiviert'}",
-                              color=discord.Color.blue())
-        embed.set_footer(text=f"{self.t('progress_bar')} {self.progress_bar()}")
-        return embed
-
+        return discord.Embed(
+            title=self.t("mod_title"),
+            description=f"**{self.t('mod_dm_kick')}:** {self.t('on') if self.data.get('dm_on_kick') else self.t('off')}\n**{self.t('mod_dm_ban')}:** {self.t('on') if self.data.get('dm_on_ban') else self.t('off')}\n**{self.t('mod_auto')}:** {'Konfiguriert' if self.data.get('auto_mod') else 'Deaktiviert'}",
+            color=discord.Color.blue(),
+        ).set_footer(text=f"{self.t('progress_bar')} {self.progress_bar()}")
 
 class AutoModModal(Modal, title="Auto-Mod Einstellungen"):
     max_mentions = TextInput(label="Max Mentions", placeholder="5", required=False)
     max_role_mentions = TextInput(label="Max Role Mentions", placeholder="3", required=False)
     spam_detection = TextInput(label="Spam Detection (sec)", placeholder="2", required=False)
-
     def __init__(self, view):
         super().__init__()
         self.view = view
-
     async def on_submit(self, interaction):
-        data = self.view.data
-        am = data.get("auto_mod", {})
-        if self.max_mentions.value.strip():
-            try:
-                am["max_mentions"] = int(self.max_mentions.value)
-            except:
-                await interaction.response.send_message("❌ Invalid number.", ephemeral=True)
-                return
-        if self.max_role_mentions.value.strip():
-            try:
-                am["max_role_mentions"] = int(self.max_role_mentions.value)
-            except:
-                await interaction.response.send_message("❌ Invalid number.", ephemeral=True)
-                return
-        if self.spam_detection.value.strip():
-            try:
-                am["spam_detection"] = int(self.spam_detection.value)
-            except:
-                await interaction.response.send_message("❌ Invalid number.", ephemeral=True)
-                return
-        data["auto_mod"] = am
+        am = self.view.data.get("auto_mod", {})
+        try:
+            if self.max_mentions.value.strip(): am["max_mentions"] = int(self.max_mentions.value)
+            if self.max_role_mentions.value.strip(): am["max_role_mentions"] = int(self.max_role_mentions.value)
+            if self.spam_detection.value.strip(): am["spam_detection"] = int(self.spam_detection.value)
+            self.view.data["auto_mod"] = am
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid number.", ephemeral=True)
+            return
         await interaction.response.send_message("✅ Auto-Mod saved.", ephemeral=True)
-        embed = self.view.build_embed()
-        await self.view.message.edit(embed=embed, view=self.view)
-
+        await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 # -------------------------------------------------------------------
-# Schritt 5: Final (Korrigiert: self.cog.bot statt self.bot)
+# Schritt 5: Final
 # -------------------------------------------------------------------
 class Step5FinalView(BaseStepView):
     step_number = 5
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.add_item(EmbedsBtn(self))
-        self.add_item(JumpSelect(self))
-        self.add_item(Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1))
-        self.add_item(Button(label=self.t("final_save"), style=discord.ButtonStyle.green, row=1))
-        self.children[0].callback = self.toggle_embeds
-        self.children[1].callback = self.jump_callback
-        self.children[2].callback = self.prev_step
-        self.children[3].callback = self.save
-
-    class EmbedsBtn(Button):
-        def __init__(self, parent):
-            state = parent.data.get("embeds_disabled")
-            label = f"{parent.t('final_embeds')}: {parent.t('on') if state else parent.t('off')}"
-            super().__init__(label=label, style=discord.ButtonStyle.secondary)
+        btn_embeds = Button(label=f"{self.t('final_embeds')}: {self.t('on') if self.data.get('embeds_disabled') else self.t('off')}", style=discord.ButtonStyle.secondary)
+        btn_embeds.callback = self.toggle_embeds
+        self.add_item(btn_embeds)
+        jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
+        sel_jump.callback = self.jump_callback
+        self.add_item(sel_jump)
+        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
+        btn_back.callback = self.prev_step
+        self.add_item(btn_back)
+        btn_save = Button(label=self.t("final_save"), style=discord.ButtonStyle.green, row=1)
+        btn_save.callback = self.save
+        self.add_item(btn_save)
 
     async def toggle_embeds(self, interaction):
         self.data["embeds_disabled"] = not self.data.get("embeds_disabled")
         new_view = Step5FinalView(self.cog, self.author, self.guild, self.data, self.message)
-        embed = new_view.build_embed()
-        await interaction.response.edit_message(embed=embed, view=new_view)
-
-    class JumpSelect(Select):
-        def __init__(self, parent):
-            opts = []
-            for i, name in enumerate(TEXTS[parent.locale]["step_names"], 1):
-                opts.append(discord.SelectOption(label=f"{i}. {name}", value=str(i)))
-            super().__init__(placeholder=parent.t("jump_to"), options=opts, min_values=1, max_values=1)
-
+        await interaction.response.edit_message(embed=new_view.build_embed(), view=new_view)
     async def jump_callback(self, interaction): await self.jump_to_step(interaction, int(interaction.data["values"][0]))
     async def prev_step(self, interaction, button): await self.go_to_previous(interaction, Step4ModerationView)
 
     async def save(self, interaction, button):
         guild = self.guild
-        # Wichtig: self.cog.bot verwenden, nicht self.bot
         core_conf = self.cog.bot.core_config
         if core_conf:
             await core_conf.guild(guild).prefix.set(self.data["prefix"])
@@ -975,21 +845,19 @@ class Step5FinalView(BaseStepView):
 
         await self.cog.config.guild(guild).saved_setup.clear()
         await self.cog.config.guild(guild).setup_in_progress.set(False)
-
         final_embed = discord.Embed(title=self.t("saved_title"), description=self.t("saved_desc"), color=discord.Color.green())
         self.clear_items()
         await interaction.response.edit_message(embed=final_embed, view=self)
 
     def build_embed(self):
-        embed = discord.Embed(title=self.t("final_title"),
-                              description=f"**{self.t('final_embeds')}:** {self.t('on') if self.data.get('embeds_disabled') else self.t('off')}",
-                              color=discord.Color.blue())
-        embed.set_footer(text=f"{self.t('progress_bar')} {self.progress_bar()}")
-        return embed
-
+        return discord.Embed(
+            title=self.t("final_title"),
+            description=f"**{self.t('final_embeds')}:** {self.t('on') if self.data.get('embeds_disabled') else self.t('off')}",
+            color=discord.Color.blue(),
+        ).set_footer(text=f"{self.t('progress_bar')} {self.progress_bar()}")
 
 # -------------------------------------------------------------------
-# WICHTIG: Async setup-Funktion
+# Async Setup
 # -------------------------------------------------------------------
 async def setup(bot):
     await bot.add_cog(SetupWizardCog(bot))
