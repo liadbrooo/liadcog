@@ -4,6 +4,7 @@ Cog: Vollständiger Setup-Assistent (final)
 - Standardsprache: Deutsch
 - Sichere Config-Zugriffe (safe_get/safe_set)
 - Prefix wird korrekt als Liste gespeichert
+- UI Rows sauber getrennt
 """
 import discord
 from redbot.core import commands, Config
@@ -177,7 +178,6 @@ class SetupWizardCog(commands.Cog):
     def t(locale: str, key: str, **kwargs) -> str:
         texts = TEXTS.get(locale, TEXTS["en-US"])
         val = texts.get(key, TEXTS["en-US"][key])
-        # FIX: Listen (wie step_names) haben kein .format() - das führt sonst zum Crash!
         if isinstance(val, str):
             return val.format(**kwargs)
         return val
@@ -200,7 +200,6 @@ class SetupWizardCog(commands.Cog):
                             return
                         except (discord.NotFound, discord.Forbidden):
                             pass
-                # Alte Nachricht existiert nicht mehr – Flag zurücksetzen
                 await self._reset_setup_flag(ctx.guild, clear_saved=False)
 
             saved = await self.config.guild(ctx.guild).saved_setup()
@@ -244,7 +243,6 @@ class SetupWizardCog(commands.Cog):
 
         await self.config.guild(guild).setup_in_progress.set(True)
         data = await DataCollector(self, guild).collect_all()
-        # Standardsprache Deutsch, wenn nichts gespeichert
         if not data.get("locale"):
             data["locale"] = "de"
         locale = data["locale"]
@@ -306,7 +304,6 @@ class SetupWizardCog(commands.Cog):
     async def _apply_imported_settings(self, guild: discord.Guild, data: dict):
         core_conf = getattr(self.bot, "core_config", None)
         if core_conf:
-            # FIX: Redbot erwartet Prefix als Liste
             prefix = data.get("prefix")
             if isinstance(prefix, str):
                 prefix = [prefix]
@@ -443,7 +440,6 @@ class BaseStepView(View):
             await interaction.response.edit_message(embed=embed, view=new_view)
 
     async def on_timeout(self):
-        # FIX: Speichere den Stand, aber lösche ihn NICHT gleich wieder
         await self.cog.config.guild(self.guild).saved_setup.set({
             "data": self.data,
             "step": self.step_number,
@@ -476,9 +472,8 @@ class ResumeView(View):
     def t(self, key, **kwargs):
         return SetupWizardCog.t(self.locale, key, **kwargs)
 
-    @discord.ui.button(label="Fortsetzen", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="Fortsetzen", style=discord.ButtonStyle.green, row=0)
     async def resume(self, interaction: discord.Interaction, button: Button):
-        # FIX: Nicht aus der Config löschen, nur Status aktualisieren
         await self.cog.config.guild(self.guild).setup_in_progress.set(True)
         await self.cog.config.guild(self.guild).setup_message_id.set(interaction.message.id)
         await self.cog.config.guild(self.guild).setup_channel_id.set(interaction.message.channel.id)
@@ -491,7 +486,7 @@ class ResumeView(View):
         embed = view.build_embed()
         await interaction.response.edit_message(embed=embed, view=view)
 
-    @discord.ui.button(label="Neu starten", style=discord.ButtonStyle.red)
+    @discord.ui.button(label="Neu starten", style=discord.ButtonStyle.red, row=0)
     async def restart(self, interaction: discord.Interaction, button: Button):
         await self.cog._reset_setup_flag(self.guild, clear_saved=True)
         await self.cog.start_fresh_setup(interaction)
@@ -514,7 +509,7 @@ class StartView(View):
             return False
         return True
 
-    @discord.ui.button(label="Start", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.green, row=0)
     async def start_button(self, interaction: discord.Interaction, button: Button):
         next_view = Step1GeneralView(self.cog, self.author, self.guild, self.data, self.message)
         embed = next_view.build_embed()
@@ -531,9 +526,13 @@ class Step1GeneralView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        btn_prefix = Button(label=self.t("general_prefix"), style=discord.ButtonStyle.primary)
+        btn_prefix = Button(label=self.t("general_prefix"), style=discord.ButtonStyle.primary, row=0)
         btn_prefix.callback = self.prefix_callback
         self.add_item(btn_prefix)
+
+        btn_color = Button(label=self.t("general_color"), style=discord.ButtonStyle.primary, row=0)
+        btn_color.callback = self.color_callback
+        self.add_item(btn_color)
 
         sel_locale = Select(
             placeholder="Sprache / Language",
@@ -544,14 +543,11 @@ class Step1GeneralView(BaseStepView):
                 discord.SelectOption(label="Français", value="fr"),
                 discord.SelectOption(label="Español", value="es"),
                 discord.SelectOption(label="Italiano", value="it"),
-            ]
+            ],
+            row=1
         )
         sel_locale.callback = self.locale_callback
         self.add_item(sel_locale)
-
-        btn_color = Button(label=self.t("general_color"), style=discord.ButtonStyle.primary)
-        btn_color.callback = self.color_callback
-        self.add_item(btn_color)
 
         sel_format = Select(
             placeholder="Datumsformat",
@@ -560,22 +556,22 @@ class Step1GeneralView(BaseStepView):
                 discord.SelectOption(label="USA (MM/TT/JJJJ)", value="en-US"),
                 discord.SelectOption(label="UK (TT/MM/JJJJ)", value="en-GB"),
                 discord.SelectOption(label="Frankreich (JJJJ-MM-TT)", value="fr"),
-            ]
+            ],
+            row=2
         )
         sel_format.callback = self.regional_callback
         self.add_item(sel_format)
 
-        # Jump-Select – verwendet die Liste direkt
-        step_names = self.t("step_names")  # Liste
+        step_names = self.t("step_names")
         jump_options = [
             discord.SelectOption(label=f"{i}. {name}", value=str(i))
             for i, name in enumerate(step_names, 1)
         ]
-        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_options)
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_options, row=3)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
 
-        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1) # FIX: row=1 statt row=2
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=4)
         btn_next.callback = self.next_step
         self.add_item(btn_next)
 
@@ -604,7 +600,6 @@ class Step1GeneralView(BaseStepView):
         await self.go_to_next(interaction, Step2RolesView)
 
     def build_embed(self) -> discord.Embed:
-        # FIX: Prefix korrekt als String formatieren, falls er eine Liste ist
         prefix_val = self.data.get("prefix", ["!"])
         if isinstance(prefix_val, list):
             prefix = " ".join(f"`{p}`" for p in prefix_val)
@@ -628,7 +623,6 @@ class PrefixModal(Modal, title="Prefix setzen"):
         super().__init__()
         self.view = view
     async def on_submit(self, interaction: discord.Interaction):
-        # FIX: Redbot erwartet eine Liste für Prefixe
         val = self.prefix_input.value.strip()
         if "," in val:
             self.view.data["prefix"] = [p.strip() for p in val.split(",") if p.strip()]
@@ -667,14 +661,14 @@ class Step2RolesView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        sel_admin = Select(placeholder="Admin-Rolle", options=self._role_options())
+        sel_admin = Select(placeholder="Admin-Rolle", options=self._role_options(), row=0)
         sel_admin.callback = self.admin_select
         self.add_item(sel_admin)
-        sel_mod = Select(placeholder="Mod-Rolle", options=self._role_options())
+        sel_mod = Select(placeholder="Mod-Rolle", options=self._role_options(), row=1)
         sel_mod.callback = self.mod_select
         self.add_item(sel_mod)
         if "mute_role" in self.data:
-            sel_mute = Select(placeholder="Mute-Rolle", options=self._role_options())
+            sel_mute = Select(placeholder="Mute-Rolle", options=self._role_options(), row=2)
             sel_mute.callback = self.mute_select
             self.add_item(sel_mute)
 
@@ -683,14 +677,14 @@ class Step2RolesView(BaseStepView):
             discord.SelectOption(label=f"{i}. {name}", value=str(i))
             for i, name in enumerate(step_names, 1)
         ]
-        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts, row=3)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
 
-        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
+        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=4)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
-        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1)
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=4)
         btn_next.callback = self.next_step
         self.add_item(btn_next)
 
@@ -741,13 +735,13 @@ class Step3LogsView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        sel_modlog = Select(placeholder="Mod-Log", options=self._channel_opts())
+        sel_modlog = Select(placeholder="Mod-Log", options=self._channel_opts(), row=0)
         sel_modlog.callback = self.modlog_cb
         self.add_item(sel_modlog)
-        sel_serverlog = Select(placeholder="Server-Log", options=self._channel_opts())
+        sel_serverlog = Select(placeholder="Server-Log", options=self._channel_opts(), row=1)
         sel_serverlog.callback = self.serverlog_cb
         self.add_item(sel_serverlog)
-        sel_messagelog = Select(placeholder="Nachrichten-Log", options=self._channel_opts())
+        sel_messagelog = Select(placeholder="Nachrichten-Log", options=self._channel_opts(), row=2)
         sel_messagelog.callback = self.messagelog_cb
         self.add_item(sel_messagelog)
 
@@ -756,14 +750,14 @@ class Step3LogsView(BaseStepView):
             discord.SelectOption(label=f"{i}. {name}", value=str(i))
             for i, name in enumerate(step_names, 1)
         ]
-        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts, row=3)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
 
-        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
+        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=4)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
-        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1)
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=4)
         btn_next.callback = self.next_step
         self.add_item(btn_next)
 
@@ -808,13 +802,13 @@ class Step4ModerationView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        btn_kick = Button(label=f"{self.t('mod_dm_kick')}: {self.t('on') if self.data.get('dm_on_kick') else self.t('off')}", style=discord.ButtonStyle.secondary)
+        btn_kick = Button(label=f"{self.t('mod_dm_kick')}: {self.t('on') if self.data.get('dm_on_kick') else self.t('off')}", style=discord.ButtonStyle.secondary, row=0)
         btn_kick.callback = self.toggle_kick
         self.add_item(btn_kick)
-        btn_ban = Button(label=f"{self.t('mod_dm_ban')}: {self.t('on') if self.data.get('dm_on_ban') else self.t('off')}", style=discord.ButtonStyle.secondary)
+        btn_ban = Button(label=f"{self.t('mod_dm_ban')}: {self.t('on') if self.data.get('dm_on_ban') else self.t('off')}", style=discord.ButtonStyle.secondary, row=0)
         btn_ban.callback = self.toggle_ban
         self.add_item(btn_ban)
-        btn_auto = Button(label=self.t("mod_auto"), style=discord.ButtonStyle.primary)
+        btn_auto = Button(label=self.t("mod_auto"), style=discord.ButtonStyle.primary, row=0)
         btn_auto.callback = self.auto_mod_modal
         self.add_item(btn_auto)
 
@@ -823,14 +817,14 @@ class Step4ModerationView(BaseStepView):
             discord.SelectOption(label=f"{i}. {name}", value=str(i))
             for i, name in enumerate(step_names, 1)
         ]
-        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts, row=1)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
 
-        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
+        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=2)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
-        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1)
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=2)
         btn_next.callback = self.next_step
         self.add_item(btn_next)
 
@@ -884,7 +878,7 @@ class Step5FinalView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        btn_embeds = Button(label=f"{self.t('final_embeds')}: {self.t('on') if self.data.get('embeds_disabled') else self.t('off')}", style=discord.ButtonStyle.secondary)
+        btn_embeds = Button(label=f"{self.t('final_embeds')}: {self.t('on') if self.data.get('embeds_disabled') else self.t('off')}", style=discord.ButtonStyle.secondary, row=0)
         btn_embeds.callback = self.toggle_embeds
         self.add_item(btn_embeds)
 
@@ -893,14 +887,14 @@ class Step5FinalView(BaseStepView):
             discord.SelectOption(label=f"{i}. {name}", value=str(i))
             for i, name in enumerate(step_names, 1)
         ]
-        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
+        sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts, row=1)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
 
-        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
+        btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=2)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
-        btn_save = Button(label=self.t("final_save"), style=discord.ButtonStyle.green, row=1)
+        btn_save = Button(label=self.t("final_save"), style=discord.ButtonStyle.green, row=2)
         btn_save.callback = self.save
         self.add_item(btn_save)
 
@@ -915,7 +909,6 @@ class Step5FinalView(BaseStepView):
         guild = self.guild
         core_conf = getattr(self.cog.bot, "core_config", None)
         if core_conf:
-            # FIX: Prefix als Liste sicherstellen
             prefix = self.data.get("prefix")
             if isinstance(prefix, str):
                 prefix = [prefix]
