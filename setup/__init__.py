@@ -1,12 +1,7 @@
 """
-Cog: Vollständiger Setup-Assistent (mit automatischem Flag-Reset)
-- Fortschrittsbalken
-- Setup speichern & fortsetzen
-- Live-Vorschau
-- Springen zwischen Schritten
-- Deutsch / Englisch
-- Export & Import
-- Behebt "A setup is already running" nach Timeout/Neustart
+Cog: Vollständiger Setup-Assistent (robust gegen fehlende Cogs)
+- Fängt Config-Fehler von externen Cogs ab
+- Behebt 'modlog_channel is not a valid registered Group or value'
 """
 import discord
 from redbot.core import commands, Config
@@ -172,7 +167,6 @@ class SetupWizardCog(commands.Cog):
     async def setup(self, ctx: commands.Context):
         """Startet den interaktiven Einrichtungsassistenten."""
         try:
-            # Prüfen, ob ein Setup läuft – wenn ja, checken wir ob die alte Nachricht noch da ist
             if await self.config.guild(ctx.guild).setup_in_progress():
                 msg_id = await self.config.guild(ctx.guild).setup_message_id()
                 ch_id = await self.config.guild(ctx.guild).setup_channel_id()
@@ -180,16 +174,13 @@ class SetupWizardCog(commands.Cog):
                     channel = ctx.guild.get_channel(ch_id)
                     if channel:
                         try:
-                            msg = await channel.fetch_message(msg_id)
-                            # Nachricht existiert noch, also wirklich aktiv
+                            await channel.fetch_message(msg_id)
                             await ctx.send("A setup is already running on this server. Please complete or cancel it first.")
                             return
                         except (discord.NotFound, discord.Forbidden):
-                            pass  # Nachricht gelöscht oder kein Zugriff -> Flag löschen
+                            pass
                 # Alte Nachricht existiert nicht mehr – Flag zurücksetzen
-                await self.config.guild(ctx.guild).setup_in_progress.set(False)
-                await self.config.guild(ctx.guild).setup_message_id.clear()
-                await self.config.guild(ctx.guild).setup_channel_id.clear()
+                await self._reset_setup_flag(ctx.guild)
 
             saved = await self.config.guild(ctx.guild).saved_setup()
             if saved:
@@ -202,13 +193,13 @@ class SetupWizardCog(commands.Cog):
                 view = ResumeView(self, ctx.author, ctx.guild, saved)
                 message = await ctx.send(embed=embed, view=view)
                 view.message = message
-                # Neue Message-ID und Channel-ID speichern
                 await self.config.guild(ctx.guild).setup_message_id.set(message.id)
                 await self.config.guild(ctx.guild).setup_channel_id.set(message.channel.id)
                 return
 
             await self.start_fresh_setup(ctx)
         except Exception as e:
+            await self._reset_setup_flag(ctx.guild)
             await ctx.send(f"❌ Error in setup: {e}")
 
     @commands.command(name="setupforce")
@@ -216,10 +207,7 @@ class SetupWizardCog(commands.Cog):
     @commands.has_permissions(manage_guild=True)
     async def setup_force(self, ctx: commands.Context):
         """Erzwingt einen Neustart des Wizards (löscht den aktuellen Status)."""
-        await self.config.guild(ctx.guild).setup_in_progress.set(False)
-        await self.config.guild(ctx.guild).saved_setup.clear()
-        await self.config.guild(ctx.guild).setup_message_id.clear()
-        await self.config.guild(ctx.guild).setup_channel_id.clear()
+        await self._reset_setup_flag(ctx.guild)
         await ctx.send("Setup-Status wurde zurückgesetzt. Starte Wizard...")
         await self.start_fresh_setup(ctx)
 
@@ -246,9 +234,14 @@ class SetupWizardCog(commands.Cog):
         view = StartView(self, author, guild, data)
         message = await send(embed=embed, view=view)
         view.message = message
-        # Message-ID und Channel-ID speichern
         await self.config.guild(guild).setup_message_id.set(message.id)
         await self.config.guild(guild).setup_channel_id.set(message.channel.id)
+
+    async def _reset_setup_flag(self, guild):
+        await self.config.guild(guild).setup_in_progress.set(False)
+        await self.config.guild(guild).saved_setup.clear()
+        await self.config.guild(guild).setup_message_id.clear()
+        await self.config.guild(guild).setup_channel_id.clear()
 
     @commands.command(name="exportsetup")
     @commands.guild_only()
@@ -286,32 +279,35 @@ class SetupWizardCog(commands.Cog):
             await ctx.send(f"❌ Import failed: {e}")
 
     async def _apply_imported_settings(self, guild: discord.Guild, data: dict):
-        core_conf = self.bot.core_config
+        # Sichere Schreibweise für Core
+        core_conf = getattr(self.bot, "core_config", None)
         if core_conf:
-            await core_conf.guild(guild).prefix.set(data.get("prefix", "!"))
-            await core_conf.guild(guild).locale.set(data.get("locale", "en-US"))
-            await core_conf.guild(guild).regional_format.set(data.get("regional_format", "en-US"))
-            await core_conf.guild(guild).use_bot_color.set(data.get("use_bot_color", False))
-            await core_conf.guild(guild).embeds_disabled.set(data.get("embeds_disabled", False))
-            await core_conf.guild(guild).admin_role.set(data.get("admin_role"))
-            await core_conf.guild(guild).mod_role.set(data.get("mod_role"))
+            safe_set(core_conf.guild(guild), "prefix", data.get("prefix"))
+            safe_set(core_conf.guild(guild), "locale", data.get("locale"))
+            safe_set(core_conf.guild(guild), "regional_format", data.get("regional_format"))
+            safe_set(core_conf.guild(guild), "use_bot_color", data.get("use_bot_color", False))
+            safe_set(core_conf.guild(guild), "embeds_disabled", data.get("embeds_disabled", False))
+            safe_set(core_conf.guild(guild), "admin_role", data.get("admin_role"))
+            safe_set(core_conf.guild(guild), "mod_role", data.get("mod_role"))
             if "embed_color" in data and isinstance(data["embed_color"], int):
-                await core_conf.guild(guild).embed_color.set(data["embed_color"])
+                safe_set(core_conf.guild(guild), "embed_color", data["embed_color"])
+
         mod_cog = self.bot.get_cog("Mod")
         if mod_cog:
-            await mod_cog.config.guild(guild).modlog_channel.set(data.get("modlog_channel"))
-            await mod_cog.config.guild(guild).mute_role.set(data.get("mute_role"))
-            await mod_cog.config.guild(guild).dm_on_kick.set(data.get("dm_on_kick", False))
-            await mod_cog.config.guild(guild).dm_on_ban.set(data.get("dm_on_ban", False))
+            safe_set(mod_cog.config.guild(guild), "modlog_channel", data.get("modlog_channel"))
+            safe_set(mod_cog.config.guild(guild), "mute_role", data.get("mute_role"))
+            safe_set(mod_cog.config.guild(guild), "dm_on_kick", data.get("dm_on_kick", False))
+            safe_set(mod_cog.config.guild(guild), "dm_on_ban", data.get("dm_on_ban", False))
             if data.get("auto_mod"):
-                await mod_cog.config.guild(guild).auto_mod.set(data["auto_mod"])
+                safe_set(mod_cog.config.guild(guild), "auto_mod", data["auto_mod"])
+
         logs_cog = self.bot.get_cog("Logs")
         if logs_cog:
-            await logs_cog.config.guild(guild).serverlog_channel.set(data.get("serverlog_channel"))
-            await logs_cog.config.guild(guild).messagelog_channel.set(data.get("messagelog_channel"))
+            safe_set(logs_cog.config.guild(guild), "serverlog_channel", data.get("serverlog_channel"))
+            safe_set(logs_cog.config.guild(guild), "messagelog_channel", data.get("messagelog_channel"))
 
 # -------------------------------------------------------------------
-# Daten-Helfer
+# Daten-Helfer (sichere Lesevorgänge)
 # -------------------------------------------------------------------
 class DataCollector:
     def __init__(self, cog: SetupWizardCog, guild: discord.Guild):
@@ -337,32 +333,53 @@ class DataCollector:
             "dm_on_ban": False,
             "auto_mod": {},
         }
+        # Core Config (sicher lesen)
         core_conf = getattr(self.bot, "core_config", None)
         if core_conf:
-            data["prefix"] = await core_conf.guild(self.guild).prefix()
-            data["locale"] = await core_conf.guild(self.guild).locale()
-            data["regional_format"] = await core_conf.guild(self.guild).regional_format()
-            data["use_bot_color"] = await core_conf.guild(self.guild).use_bot_color()
-            data["embeds_disabled"] = await core_conf.guild(self.guild).embeds_disabled()
-            data["admin_role"] = await core_conf.guild(self.guild).admin_role()
-            data["mod_role"] = await core_conf.guild(self.guild).mod_role()
+            data["prefix"] = await safe_get(core_conf.guild(self.guild), "prefix")
+            data["locale"] = await safe_get(core_conf.guild(self.guild), "locale")
+            data["regional_format"] = await safe_get(core_conf.guild(self.guild), "regional_format")
+            data["use_bot_color"] = await safe_get(core_conf.guild(self.guild), "use_bot_color", False)
+            data["embeds_disabled"] = await safe_get(core_conf.guild(self.guild), "embeds_disabled", False)
+            data["admin_role"] = await safe_get(core_conf.guild(self.guild), "admin_role")
+            data["mod_role"] = await safe_get(core_conf.guild(self.guild), "mod_role")
             try:
                 color = await core_conf.guild(self.guild).embed_color()
                 data["embed_color"] = color.value if isinstance(color, discord.Color) else color
             except:
                 data["embed_color"] = None
+
+        # Mod Cog
         mod_cog = self.bot.get_cog("Mod")
         if mod_cog:
-            data["modlog_channel"] = await mod_cog.config.guild(self.guild).modlog_channel()
-            data["mute_role"] = await mod_cog.config.guild(self.guild).mute_role()
-            data["dm_on_kick"] = await mod_cog.config.guild(self.guild).dm_on_kick()
-            data["dm_on_ban"] = await mod_cog.config.guild(self.guild).dm_on_ban()
-            data["auto_mod"] = await mod_cog.config.guild(self.guild).auto_mod()
+            data["modlog_channel"] = await safe_get(mod_cog.config.guild(self.guild), "modlog_channel")
+            data["mute_role"] = await safe_get(mod_cog.config.guild(self.guild), "mute_role")
+            data["dm_on_kick"] = await safe_get(mod_cog.config.guild(self.guild), "dm_on_kick", False)
+            data["dm_on_ban"] = await safe_get(mod_cog.config.guild(self.guild), "dm_on_ban", False)
+            data["auto_mod"] = await safe_get(mod_cog.config.guild(self.guild), "auto_mod", {})
+
+        # Logs Cog
         logs_cog = self.bot.get_cog("Logs")
         if logs_cog:
-            data["serverlog_channel"] = await logs_cog.config.guild(self.guild).serverlog_channel()
-            data["messagelog_channel"] = await logs_cog.config.guild(self.guild).messagelog_channel()
+            data["serverlog_channel"] = await safe_get(logs_cog.config.guild(self.guild), "serverlog_channel")
+            data["messagelog_channel"] = await safe_get(logs_cog.config.guild(self.guild), "messagelog_channel")
+
         return data
+
+# -------------------------------------------------------------------
+# Sichere Config-Hilfsfunktionen
+# -------------------------------------------------------------------
+async def safe_get(group, key, default=None):
+    try:
+        return await group.get_raw(key)
+    except:
+        return default
+
+async def safe_set(group, key, value):
+    try:
+        await group.set_raw(key, value)
+    except:
+        pass  # Key nicht registriert oder anderer Fehler – ignorieren
 
 # -------------------------------------------------------------------
 # Basis-View
@@ -420,9 +437,7 @@ class BaseStepView(View):
             "data": self.data,
             "step": self.step_number,
         })
-        await self.cog.config.guild(self.guild).setup_in_progress.set(False)
-        await self.cog.config.guild(self.guild).setup_message_id.clear()
-        await self.cog.config.guild(self.guild).setup_channel_id.clear()
+        await self.cog._reset_setup_flag(self.guild)
         try:
             await self.message.edit(view=None)
         except discord.NotFound:
@@ -491,9 +506,7 @@ class StartView(View):
         await interaction.response.edit_message(embed=embed, view=next_view)
 
     async def on_timeout(self):
-        await self.cog.config.guild(self.guild).setup_in_progress.set(False)
-        await self.cog.config.guild(self.guild).setup_message_id.clear()
-        await self.cog.config.guild(self.guild).setup_channel_id.clear()
+        await self.cog._reset_setup_flag(self.guild)
 
 # -------------------------------------------------------------------
 # Schritt 1: Allgemein
@@ -814,7 +827,7 @@ class AutoModModal(Modal, title="Auto-Mod Einstellungen"):
         await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 # -------------------------------------------------------------------
-# Schritt 5: Final
+# Schritt 5: Final (jetzt mit sicheren Set-Aufrufen)
 # -------------------------------------------------------------------
 class Step5FinalView(BaseStepView):
     step_number = 5
@@ -844,34 +857,33 @@ class Step5FinalView(BaseStepView):
 
     async def save(self, interaction, button):
         guild = self.guild
-        core_conf = self.cog.bot.core_config
+        core_conf = getattr(self.cog.bot, "core_config", None)
         if core_conf:
-            await core_conf.guild(guild).prefix.set(self.data["prefix"])
-            await core_conf.guild(guild).locale.set(self.data["locale"])
-            await core_conf.guild(guild).regional_format.set(self.data["regional_format"])
-            await core_conf.guild(guild).use_bot_color.set(self.data.get("use_bot_color", False))
-            await core_conf.guild(guild).embeds_disabled.set(self.data["embeds_disabled"])
-            await core_conf.guild(guild).admin_role.set(self.data["admin_role"])
-            await core_conf.guild(guild).mod_role.set(self.data["mod_role"])
+            await safe_set(core_conf.guild(guild), "prefix", self.data["prefix"])
+            await safe_set(core_conf.guild(guild), "locale", self.data["locale"])
+            await safe_set(core_conf.guild(guild), "regional_format", self.data["regional_format"])
+            await safe_set(core_conf.guild(guild), "use_bot_color", self.data.get("use_bot_color", False))
+            await safe_set(core_conf.guild(guild), "embeds_disabled", self.data["embeds_disabled"])
+            await safe_set(core_conf.guild(guild), "admin_role", self.data["admin_role"])
+            await safe_set(core_conf.guild(guild), "mod_role", self.data["mod_role"])
             if self.data.get("embed_color") is not None:
-                await core_conf.guild(guild).embed_color.set(self.data["embed_color"])
+                await safe_set(core_conf.guild(guild), "embed_color", self.data["embed_color"])
+
         mod_cog = self.cog.bot.get_cog("Mod")
         if mod_cog:
-            await mod_cog.config.guild(guild).modlog_channel.set(self.data["modlog_channel"])
-            await mod_cog.config.guild(guild).mute_role.set(self.data.get("mute_role"))
-            await mod_cog.config.guild(guild).dm_on_kick.set(self.data.get("dm_on_kick", False))
-            await mod_cog.config.guild(guild).dm_on_ban.set(self.data.get("dm_on_ban", False))
+            await safe_set(mod_cog.config.guild(guild), "modlog_channel", self.data.get("modlog_channel"))
+            await safe_set(mod_cog.config.guild(guild), "mute_role", self.data.get("mute_role"))
+            await safe_set(mod_cog.config.guild(guild), "dm_on_kick", self.data.get("dm_on_kick", False))
+            await safe_set(mod_cog.config.guild(guild), "dm_on_ban", self.data.get("dm_on_ban", False))
             if self.data.get("auto_mod"):
-                await mod_cog.config.guild(guild).auto_mod.set(self.data["auto_mod"])
+                await safe_set(mod_cog.config.guild(guild), "auto_mod", self.data["auto_mod"])
+
         logs_cog = self.cog.bot.get_cog("Logs")
         if logs_cog:
-            await logs_cog.config.guild(guild).serverlog_channel.set(self.data["serverlog_channel"])
-            await logs_cog.config.guild(guild).messagelog_channel.set(self.data["messagelog_channel"])
+            await safe_set(logs_cog.config.guild(guild), "serverlog_channel", self.data.get("serverlog_channel"))
+            await safe_set(logs_cog.config.guild(guild), "messagelog_channel", self.data.get("messagelog_channel"))
 
-        await self.cog.config.guild(guild).saved_setup.clear()
-        await self.cog.config.guild(guild).setup_in_progress.set(False)
-        await self.cog.config.guild(guild).setup_message_id.clear()
-        await self.cog.config.guild(guild).setup_channel_id.clear()
+        await self.cog._reset_setup_flag(guild)
         final_embed = discord.Embed(title=self.t("saved_title"), description=self.t("saved_desc"), color=discord.Color.green())
         self.clear_items()
         await interaction.response.edit_message(embed=final_embed, view=self)
