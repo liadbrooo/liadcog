@@ -1,5 +1,5 @@
 """
-Cog: Vollständiger Setup-Assistent (Erweitert & stabil)
+Cog: Vollständiger Setup-Assistent (final & stabil)
 - Fortschrittsbalken
 - Setup speichern und fortsetzen
 - Live-Vorschau (Farbe & Prefix)
@@ -191,7 +191,6 @@ class SetupWizardCog(commands.Cog):
 
     async def start_fresh_setup(self, source):
         """Startet ein neues Setup (sowohl von Context als auch von Interaction aus)."""
-        # source kann ein Context oder eine Interaction sein
         if isinstance(source, commands.Context):
             guild = source.guild
             author = source.author
@@ -200,11 +199,11 @@ class SetupWizardCog(commands.Cog):
             # Interaction
             guild = source.guild
             author = source.user
-            send = source.channel.send  # wir antworten später separat
+            send = source.channel.send
 
         await self.config.guild(guild).setup_in_progress.set(True)
 
-        # Sprache aus aktuellen Daten holen (asynchron)
+        # Sprache aus aktuellen Daten holen
         data = await DataCollector(self, guild).collect_all()
         locale = data.get("locale", "en-US")
 
@@ -218,9 +217,7 @@ class SetupWizardCog(commands.Cog):
         if isinstance(source, commands.Context):
             message = await send(embed=embed, view=view)
         else:
-            # Interaction: response.edit_message? Nein, wir starten eine neue Nachricht
             message = await send(embed=embed, view=view)
-            # ursprüngliche Nachricht (mit den Resume-Buttons) löschen, falls vorhanden
             try:
                 await source.message.delete()
             except:
@@ -233,7 +230,6 @@ class SetupWizardCog(commands.Cog):
     async def export_setup(self, ctx: commands.Context):
         """Exportiert die aktuellen Servereinstellungen als JSON-Datei."""
         data = await DataCollector(self, ctx.guild).collect_all()
-        # Bestimmte Felder wie discord.Color in String umwandeln
         for key in ["embed_color", "use_bot_color"]:
             if isinstance(data.get(key), discord.Color):
                 data[key] = data[key].value
@@ -256,11 +252,9 @@ class SetupWizardCog(commands.Cog):
         except Exception:
             await ctx.send(self.t("en-US", "import_fail"))
             return
-
         if not isinstance(data, dict):
             await ctx.send(self.t("en-US", "import_fail"))
             return
-
         await self._apply_imported_settings(ctx.guild, data)
         await ctx.send(self.t(data.get("locale", "en-US"), "import_success"))
 
@@ -356,7 +350,7 @@ class BaseStepView(View):
         self.guild = guild
         self.data = data
         self.message = message
-        self.locale = data.get("locale", "en-US")  # Locale direkt aus data
+        self.locale = data.get("locale", "en-US")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
@@ -455,10 +449,7 @@ class ResumeView(View):
     @discord.ui.button(label="Neu starten", style=discord.ButtonStyle.red)
     async def restart(self, interaction: discord.Interaction, button: Button):
         await self.cog.config.guild(self.guild).saved_setup.clear()
-        # Neues Setup starten – wir rufen start_fresh_setup mit interaction auf
         await self.cog.start_fresh_setup(interaction)
-        # Die neue Nachricht wird dort gesendet, wir müssen nichts weiter tun.
-        # Die ursprüngliche Resume-Nachricht wird bereits von start_fresh_setup gelöscht.
 
 
 # -------------------------------------------------------------------
@@ -917,7 +908,7 @@ class AutoModModal(Modal, title="Auto-Mod Einstellungen"):
 
 
 # -------------------------------------------------------------------
-# Schritt 5: Final
+# Schritt 5: Final (Korrigiert: self.cog.bot statt self.bot)
 # -------------------------------------------------------------------
 class Step5FinalView(BaseStepView):
     step_number = 5
@@ -957,7 +948,8 @@ class Step5FinalView(BaseStepView):
 
     async def save(self, interaction, button):
         guild = self.guild
-        core_conf = self.bot.core_config
+        # Wichtig: self.cog.bot verwenden, nicht self.bot
+        core_conf = self.cog.bot.core_config
         if core_conf:
             await core_conf.guild(guild).prefix.set(self.data["prefix"])
             await core_conf.guild(guild).locale.set(self.data["locale"])
@@ -968,7 +960,7 @@ class Step5FinalView(BaseStepView):
             await core_conf.guild(guild).mod_role.set(self.data["mod_role"])
             if self.data.get("embed_color") is not None:
                 await core_conf.guild(guild).embed_color.set(self.data["embed_color"])
-        mod_cog = self.bot.get_cog("Mod")
+        mod_cog = self.cog.bot.get_cog("Mod")
         if mod_cog:
             await mod_cog.config.guild(guild).modlog_channel.set(self.data["modlog_channel"])
             await mod_cog.config.guild(guild).mute_role.set(self.data.get("mute_role"))
@@ -976,7 +968,7 @@ class Step5FinalView(BaseStepView):
             await mod_cog.config.guild(guild).dm_on_ban.set(self.data.get("dm_on_ban", False))
             if self.data.get("auto_mod"):
                 await mod_cog.config.guild(guild).auto_mod.set(self.data["auto_mod"])
-        logs_cog = self.bot.get_cog("Logs")
+        logs_cog = self.cog.bot.get_cog("Logs")
         if logs_cog:
             await logs_cog.config.guild(guild).serverlog_channel.set(self.data["serverlog_channel"])
             await logs_cog.config.guild(guild).messagelog_channel.set(self.data["messagelog_channel"])
@@ -996,6 +988,8 @@ class Step5FinalView(BaseStepView):
         return embed
 
 
-# RedBot-Cog-Setup
-def setup(bot):
-    bot.add_cog(SetupWizardCog(bot))
+# -------------------------------------------------------------------
+# WICHTIG: Async setup-Funktion
+# -------------------------------------------------------------------
+async def setup(bot):
+    await bot.add_cog(SetupWizardCog(bot))
