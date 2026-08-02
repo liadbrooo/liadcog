@@ -1,11 +1,12 @@
 """
-Cog: Vollständiger Setup-Assistent (robust & fehlerresistent)
+Cog: Vollständiger Setup-Assistent (mit automatischem Flag-Reset)
 - Fortschrittsbalken
-- Setup speichern und fortsetzen
+- Setup speichern & fortsetzen
 - Live-Vorschau
-- Zwischen Schritten springen
+- Springen zwischen Schritten
 - Deutsch / Englisch
 - Export & Import
+- Behebt "A setup is already running" nach Timeout/Neustart
 """
 import discord
 from redbot.core import commands, Config
@@ -14,7 +15,6 @@ from typing import Optional, Dict, Any, List
 import asyncio
 import json
 import io
-import traceback
 
 # -------------------------------------------------------------------
 # Mehrsprachige Textbausteine
@@ -156,6 +156,8 @@ class SetupWizardCog(commands.Cog):
         default_guild = {
             "setup_in_progress": False,
             "saved_setup": None,
+            "setup_message_id": None,
+            "setup_channel_id": None,
         }
         self.config.register_guild(**default_guild)
 
@@ -170,9 +172,24 @@ class SetupWizardCog(commands.Cog):
     async def setup(self, ctx: commands.Context):
         """Startet den interaktiven Einrichtungsassistenten."""
         try:
+            # Prüfen, ob ein Setup läuft – wenn ja, checken wir ob die alte Nachricht noch da ist
             if await self.config.guild(ctx.guild).setup_in_progress():
-                await ctx.send("A setup is already running on this server.")
-                return
+                msg_id = await self.config.guild(ctx.guild).setup_message_id()
+                ch_id = await self.config.guild(ctx.guild).setup_channel_id()
+                if msg_id and ch_id:
+                    channel = ctx.guild.get_channel(ch_id)
+                    if channel:
+                        try:
+                            msg = await channel.fetch_message(msg_id)
+                            # Nachricht existiert noch, also wirklich aktiv
+                            await ctx.send("A setup is already running on this server. Please complete or cancel it first.")
+                            return
+                        except (discord.NotFound, discord.Forbidden):
+                            pass  # Nachricht gelöscht oder kein Zugriff -> Flag löschen
+                # Alte Nachricht existiert nicht mehr – Flag zurücksetzen
+                await self.config.guild(ctx.guild).setup_in_progress.set(False)
+                await self.config.guild(ctx.guild).setup_message_id.clear()
+                await self.config.guild(ctx.guild).setup_channel_id.clear()
 
             saved = await self.config.guild(ctx.guild).saved_setup()
             if saved:
@@ -185,11 +202,26 @@ class SetupWizardCog(commands.Cog):
                 view = ResumeView(self, ctx.author, ctx.guild, saved)
                 message = await ctx.send(embed=embed, view=view)
                 view.message = message
+                # Neue Message-ID und Channel-ID speichern
+                await self.config.guild(ctx.guild).setup_message_id.set(message.id)
+                await self.config.guild(ctx.guild).setup_channel_id.set(message.channel.id)
                 return
 
             await self.start_fresh_setup(ctx)
         except Exception as e:
-            await ctx.send(f"❌ Fehler im Setup-Befehl: {e}\n```py\n{traceback.format_exc()[:1500]}\n```")
+            await ctx.send(f"❌ Error in setup: {e}")
+
+    @commands.command(name="setupforce")
+    @commands.guild_only()
+    @commands.has_permissions(manage_guild=True)
+    async def setup_force(self, ctx: commands.Context):
+        """Erzwingt einen Neustart des Wizards (löscht den aktuellen Status)."""
+        await self.config.guild(ctx.guild).setup_in_progress.set(False)
+        await self.config.guild(ctx.guild).saved_setup.clear()
+        await self.config.guild(ctx.guild).setup_message_id.clear()
+        await self.config.guild(ctx.guild).setup_channel_id.clear()
+        await ctx.send("Setup-Status wurde zurückgesetzt. Starte Wizard...")
+        await self.start_fresh_setup(ctx)
 
     async def start_fresh_setup(self, source):
         if isinstance(source, commands.Context):
@@ -212,15 +244,11 @@ class SetupWizardCog(commands.Cog):
         )
         embed.set_footer(text=self.t(locale, "start_footer", user=author.display_name))
         view = StartView(self, author, guild, data)
-        if isinstance(source, commands.Context):
-            message = await send(embed=embed, view=view)
-        else:
-            message = await send(embed=embed, view=view)
-            try:
-                await source.message.delete()
-            except:
-                pass
+        message = await send(embed=embed, view=view)
         view.message = message
+        # Message-ID und Channel-ID speichern
+        await self.config.guild(guild).setup_message_id.set(message.id)
+        await self.config.guild(guild).setup_channel_id.set(message.channel.id)
 
     @commands.command(name="exportsetup")
     @commands.guild_only()
@@ -235,7 +263,7 @@ class SetupWizardCog(commands.Cog):
             file = discord.File(io.StringIO(json_str), filename="server_config.json")
             await ctx.send(self.t(data.get("locale", "en-US"), "export_sent"), file=file)
         except Exception as e:
-            await ctx.send(f"❌ Export fehlgeschlagen: {e}")
+            await ctx.send(f"❌ Export failed: {e}")
 
     @commands.command(name="importsetup")
     @commands.guild_only()
@@ -255,7 +283,7 @@ class SetupWizardCog(commands.Cog):
             await self._apply_imported_settings(ctx.guild, data)
             await ctx.send(self.t(data.get("locale", "en-US"), "import_success"))
         except Exception as e:
-            await ctx.send(f"❌ Import fehlgeschlagen: {e}")
+            await ctx.send(f"❌ Import failed: {e}")
 
     async def _apply_imported_settings(self, guild: discord.Guild, data: dict):
         core_conf = self.bot.core_config
@@ -393,6 +421,8 @@ class BaseStepView(View):
             "step": self.step_number,
         })
         await self.cog.config.guild(self.guild).setup_in_progress.set(False)
+        await self.cog.config.guild(self.guild).setup_message_id.clear()
+        await self.cog.config.guild(self.guild).setup_channel_id.clear()
         try:
             await self.message.edit(view=None)
         except discord.NotFound:
@@ -462,6 +492,8 @@ class StartView(View):
 
     async def on_timeout(self):
         await self.cog.config.guild(self.guild).setup_in_progress.set(False)
+        await self.cog.config.guild(self.guild).setup_message_id.clear()
+        await self.cog.config.guild(self.guild).setup_channel_id.clear()
 
 # -------------------------------------------------------------------
 # Schritt 1: Allgemein
@@ -471,7 +503,6 @@ class Step1GeneralView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Erstelle Komponenten direkt mit Callbacks
         btn_prefix = Button(label=self.t("general_prefix"), style=discord.ButtonStyle.primary)
         btn_prefix.callback = self.prefix_callback
         self.add_item(btn_prefix)
@@ -506,7 +537,6 @@ class Step1GeneralView(BaseStepView):
         sel_format.callback = self.regional_callback
         self.add_item(sel_format)
 
-        # Jump-Select
         jump_options = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
         sel_jump = Select(placeholder=self.t("jump_to"), options=jump_options)
         sel_jump.callback = self.jump_callback
@@ -585,32 +615,27 @@ class ColorModal(Modal, title="Embed-Farbe festlegen"):
         await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 # -------------------------------------------------------------------
-# Schritt 2: Rollen (robuster Aufbau)
+# Schritt 2: Rollen
 # -------------------------------------------------------------------
 class Step2RolesView(BaseStepView):
     step_number = 2
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Admin
         sel_admin = Select(placeholder="Admin-Rolle", options=self._role_options())
         sel_admin.callback = self.admin_select
         self.add_item(sel_admin)
-        # Mod
         sel_mod = Select(placeholder="Mod-Rolle", options=self._role_options())
         sel_mod.callback = self.mod_select
         self.add_item(sel_mod)
-        # Mute (falls vorhanden)
         if "mute_role" in self.data:
             sel_mute = Select(placeholder="Mute-Rolle", options=self._role_options())
             sel_mute.callback = self.mute_select
             self.add_item(sel_mute)
-        # Jump
         jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
         sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
-        # Zurück/Weiter
         btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
@@ -658,7 +683,7 @@ class Step2RolesView(BaseStepView):
         return role.mention if role else "❌"
 
 # -------------------------------------------------------------------
-# Schritt 3: Logs (gleiche Struktur)
+# Schritt 3: Logs
 # -------------------------------------------------------------------
 class Step3LogsView(BaseStepView):
     step_number = 3
@@ -845,6 +870,8 @@ class Step5FinalView(BaseStepView):
 
         await self.cog.config.guild(guild).saved_setup.clear()
         await self.cog.config.guild(guild).setup_in_progress.set(False)
+        await self.cog.config.guild(guild).setup_message_id.clear()
+        await self.cog.config.guild(guild).setup_channel_id.clear()
         final_embed = discord.Embed(title=self.t("saved_title"), description=self.t("saved_desc"), color=discord.Color.green())
         self.clear_items()
         await interaction.response.edit_message(embed=final_embed, view=self)
