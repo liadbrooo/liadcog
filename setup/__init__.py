@@ -1,5 +1,5 @@
 """
-Cog: Vollständiger Setup-Assistent (Erweitert)
+Cog: Vollständiger Setup-Assistent (Erweitert & stabil)
 - Fortschrittsbalken
 - Setup speichern und fortsetzen
 - Live-Vorschau (Farbe & Prefix)
@@ -159,14 +159,8 @@ class SetupWizardCog(commands.Cog):
         }
         self.config.register_guild(**default_guild)
 
-    # Hilfsmethode für Texte
-    def t(self, guild: discord.Guild, key: str, **kwargs) -> str:
-        locale = "en-US"
-        if guild:
-            # Versuche, aus der DataCollector die Locale zu bekommen – hier hilfsweise aus der Core-Config
-            core_conf = self.bot.core_config if hasattr(self.bot, "core_config") else None
-            if core_conf:
-                locale = self.bot.loop.run_until_complete(core_conf.guild(guild).locale()) or "en-US"
+    # Hilfsmethode für Texte – verwendet nur die übergebene locale
+    def t(self, locale: str, key: str, **kwargs) -> str:
         texts = TEXTS.get(locale, TEXTS["en-US"])
         return texts.get(key, TEXTS["en-US"][key]).format(**kwargs)
 
@@ -176,7 +170,7 @@ class SetupWizardCog(commands.Cog):
     async def setup(self, ctx: commands.Context):
         """Startet den interaktiven Einrichtungsassistenten."""
         if await self.config.guild(ctx.guild).setup_in_progress():
-            await ctx.send(self.t(ctx.guild, "setup_in_progress", default="A setup is already running."))
+            await ctx.send("A setup is already running on this server.")
             return
 
         # Prüfen, ob gespeichertes Setup existiert
@@ -184,8 +178,8 @@ class SetupWizardCog(commands.Cog):
         if saved:
             await self.config.guild(ctx.guild).setup_in_progress.set(True)
             embed = discord.Embed(
-                title=self.t(ctx.guild, "resume_title"),
-                description=self.t(ctx.guild, "resume_desc"),
+                title=self.t(saved.get("data", {}).get("locale", "en-US"), "resume_title"),
+                description=self.t(saved.get("data", {}).get("locale", "en-US"), "resume_desc"),
                 color=discord.Color.blue(),
             )
             view = ResumeView(self, ctx.author, ctx.guild, saved)
@@ -195,17 +189,42 @@ class SetupWizardCog(commands.Cog):
 
         await self.start_fresh_setup(ctx)
 
-    async def start_fresh_setup(self, ctx):
-        """Startet ein neues Setup (kein gespeicherter Zustand)."""
-        await self.config.guild(ctx.guild).setup_in_progress.set(True)
+    async def start_fresh_setup(self, source):
+        """Startet ein neues Setup (sowohl von Context als auch von Interaction aus)."""
+        # source kann ein Context oder eine Interaction sein
+        if isinstance(source, commands.Context):
+            guild = source.guild
+            author = source.author
+            send = source.send
+        else:
+            # Interaction
+            guild = source.guild
+            author = source.user
+            send = source.channel.send  # wir antworten später separat
+
+        await self.config.guild(guild).setup_in_progress.set(True)
+
+        # Sprache aus aktuellen Daten holen (asynchron)
+        data = await DataCollector(self, guild).collect_all()
+        locale = data.get("locale", "en-US")
+
         embed = discord.Embed(
-            title=self.t(ctx.guild, "start_title"),
-            description=f"{self.t(ctx.guild, 'start_desc')}\n\n{self.t(ctx.guild, 'start_steps')}",
+            title=self.t(locale, "start_title"),
+            description=f"{self.t(locale, 'start_desc')}\n\n{self.t(locale, 'start_steps')}",
             color=discord.Color.blue(),
         )
-        embed.set_footer(text=self.t(ctx.guild, "start_footer", user=ctx.author.display_name))
-        view = StartView(self, ctx.author, ctx.guild, fresh=True)
-        message = await ctx.send(embed=embed, view=view)
+        embed.set_footer(text=self.t(locale, "start_footer", user=author.display_name))
+        view = StartView(self, author, guild, data)
+        if isinstance(source, commands.Context):
+            message = await send(embed=embed, view=view)
+        else:
+            # Interaction: response.edit_message? Nein, wir starten eine neue Nachricht
+            message = await send(embed=embed, view=view)
+            # ursprüngliche Nachricht (mit den Resume-Buttons) löschen, falls vorhanden
+            try:
+                await source.message.delete()
+            except:
+                pass
         view.message = message
 
     @commands.command(name="exportsetup")
@@ -214,9 +233,13 @@ class SetupWizardCog(commands.Cog):
     async def export_setup(self, ctx: commands.Context):
         """Exportiert die aktuellen Servereinstellungen als JSON-Datei."""
         data = await DataCollector(self, ctx.guild).collect_all()
+        # Bestimmte Felder wie discord.Color in String umwandeln
+        for key in ["embed_color", "use_bot_color"]:
+            if isinstance(data.get(key), discord.Color):
+                data[key] = data[key].value
         json_str = json.dumps(data, indent=4, default=str)
         file = discord.File(io.StringIO(json_str), filename="server_config.json")
-        await ctx.send(self.t(ctx.guild, "export_sent"), file=file)
+        await ctx.send(self.t(data.get("locale", "en-US"), "export_sent"), file=file)
 
     @commands.command(name="importsetup")
     @commands.guild_only()
@@ -224,27 +247,24 @@ class SetupWizardCog(commands.Cog):
     async def import_setup(self, ctx: commands.Context):
         """Importiert Servereinstellungen aus einer JSON-Datei (als Anhang)."""
         if not ctx.message.attachments:
-            await ctx.send(self.t(ctx.guild, "import_no_attachment", default="Please attach a .json file."))
+            await ctx.send("Please attach a .json file.")
             return
         attachment = ctx.message.attachments[0]
         try:
             content = await attachment.read()
             data = json.loads(content)
         except Exception:
-            await ctx.send(self.t(ctx.guild, "import_fail"))
+            await ctx.send(self.t("en-US", "import_fail"))
             return
 
-        # Validierung (einfach: prüfen, ob es ein dict ist)
         if not isinstance(data, dict):
-            await ctx.send(self.t(ctx.guild, "import_fail"))
+            await ctx.send(self.t("en-US", "import_fail"))
             return
 
         await self._apply_imported_settings(ctx.guild, data)
-        await ctx.send(self.t(ctx.guild, "import_success"))
+        await ctx.send(self.t(data.get("locale", "en-US"), "import_success"))
 
     async def _apply_imported_settings(self, guild: discord.Guild, data: dict):
-        """Schreibt importierte Daten in die Configs (Core, Mod, Logs)."""
-        # Core
         core_conf = self.bot.core_config
         if core_conf:
             await core_conf.guild(guild).prefix.set(data.get("prefix", "!"))
@@ -256,7 +276,6 @@ class SetupWizardCog(commands.Cog):
             await core_conf.guild(guild).mod_role.set(data.get("mod_role"))
             if "embed_color" in data and isinstance(data["embed_color"], int):
                 await core_conf.guild(guild).embed_color.set(data["embed_color"])
-        # Mod
         mod_cog = self.bot.get_cog("Mod")
         if mod_cog:
             await mod_cog.config.guild(guild).modlog_channel.set(data.get("modlog_channel"))
@@ -265,7 +284,6 @@ class SetupWizardCog(commands.Cog):
             await mod_cog.config.guild(guild).dm_on_ban.set(data.get("dm_on_ban", False))
             if data.get("auto_mod"):
                 await mod_cog.config.guild(guild).auto_mod.set(data["auto_mod"])
-        # Logs
         logs_cog = self.bot.get_cog("Logs")
         if logs_cog:
             await logs_cog.config.guild(guild).serverlog_channel.set(data.get("serverlog_channel"))
@@ -338,7 +356,7 @@ class BaseStepView(View):
         self.guild = guild
         self.data = data
         self.message = message
-        self.locale = data.get("locale", "en-US")
+        self.locale = data.get("locale", "en-US")  # Locale direkt aus data
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
@@ -383,7 +401,6 @@ class BaseStepView(View):
             await interaction.response.edit_message(embed=embed, view=new_view)
 
     async def on_timeout(self):
-        # Setup-Fortschritt speichern
         await self.cog.config.guild(self.guild).saved_setup.set({
             "data": self.data,
             "step": self.step_number,
@@ -406,12 +423,17 @@ class ResumeView(View):
         self.guild = guild
         self.saved = saved
         self.message: Optional[discord.Message] = None
+        self.locale = saved["data"].get("locale", "en-US")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
             await interaction.response.send_message("❌ Not your session.", ephemeral=True)
             return False
         return True
+
+    def t(self, key, **kwargs):
+        texts = TEXTS.get(self.locale, TEXTS["en-US"])
+        return texts.get(key, TEXTS["en-US"][key]).format(**kwargs)
 
     @discord.ui.button(label="Fortsetzen", style=discord.ButtonStyle.green)
     async def resume(self, interaction: discord.Interaction, button: Button):
@@ -433,22 +455,24 @@ class ResumeView(View):
     @discord.ui.button(label="Neu starten", style=discord.ButtonStyle.red)
     async def restart(self, interaction: discord.Interaction, button: Button):
         await self.cog.config.guild(self.guild).saved_setup.clear()
-        # Neues Setup starten (als ob /setup frisch)
+        # Neues Setup starten – wir rufen start_fresh_setup mit interaction auf
         await self.cog.start_fresh_setup(interaction)
-        await interaction.message.delete()
+        # Die neue Nachricht wird dort gesendet, wir müssen nichts weiter tun.
+        # Die ursprüngliche Resume-Nachricht wird bereits von start_fresh_setup gelöscht.
 
 
 # -------------------------------------------------------------------
 # Start-View (frischer Start)
 # -------------------------------------------------------------------
 class StartView(View):
-    def __init__(self, cog: SetupWizardCog, author: discord.Member, guild: discord.Guild, fresh: bool = True):
+    def __init__(self, cog: SetupWizardCog, author: discord.Member, guild: discord.Guild, data: dict):
         super().__init__(timeout=300)
         self.cog = cog
         self.author = author
         self.guild = guild
         self.message: Optional[discord.Message] = None
-        self.fresh = fresh
+        self.data = data
+        self.locale = data.get("locale", "en-US")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
@@ -458,8 +482,7 @@ class StartView(View):
 
     @discord.ui.button(label="Start", style=discord.ButtonStyle.green)
     async def start_button(self, interaction: discord.Interaction, button: Button):
-        data = await DataCollector(self.cog, self.guild).collect_all()
-        next_view = Step1GeneralView(self.cog, self.author, self.guild, data, self.message)
+        next_view = Step1GeneralView(self.cog, self.author, self.guild, self.data, self.message)
         embed = next_view.build_embed()
         await interaction.response.edit_message(embed=embed, view=next_view)
 
@@ -475,15 +498,12 @@ class Step1GeneralView(BaseStepView):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Komponenten
         self.add_item(PrefixButton(self.t("general_prefix")))
         self.add_item(LocaleSelect(self))
         self.add_item(ColorButton(self.t("general_color")))
         self.add_item(RegionalFormatSelect(self))
-        # Navigation
         self.add_item(JumpSelect(self))
         self.add_item(Button(label=self.t("next"), style=discord.ButtonStyle.green, row=2))
-        # Callbacks
         self.children[0].callback = self.prefix_callback
         self.children[1].callback = self.locale_callback
         self.children[2].callback = self.color_callback
@@ -626,7 +646,6 @@ class Step2RolesView(BaseStepView):
         self.add_item(JumpSelect(self))
         self.add_item(Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1))
         self.add_item(Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1))
-        # Callbacks
         child_idx = 0
         self.children[child_idx].callback = self.admin_select; child_idx += 1
         self.children[child_idx].callback = self.mod_select; child_idx += 1
