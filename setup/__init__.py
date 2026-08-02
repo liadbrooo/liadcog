@@ -1,8 +1,9 @@
 """
 Cog: Vollständiger Setup-Assistent (final)
-- Jump-Selects nutzen Liste (kein .split())
+- Jump-Selects nutze Liste (kein .split())
 - Standardsprache: Deutsch
 - Sichere Config-Zugriffe (safe_get/safe_set)
+- Prefix wird korrekt als Liste gespeichert
 """
 import discord
 from redbot.core import commands, Config
@@ -175,7 +176,11 @@ class SetupWizardCog(commands.Cog):
     @staticmethod
     def t(locale: str, key: str, **kwargs) -> str:
         texts = TEXTS.get(locale, TEXTS["en-US"])
-        return texts.get(key, TEXTS["en-US"][key]).format(**kwargs)
+        val = texts.get(key, TEXTS["en-US"][key])
+        # FIX: Listen (wie step_names) haben kein .format() - das führt sonst zum Crash!
+        if isinstance(val, str):
+            return val.format(**kwargs)
+        return val
 
     @commands.command(name="setup")
     @commands.guild_only()
@@ -191,19 +196,19 @@ class SetupWizardCog(commands.Cog):
                     if channel:
                         try:
                             await channel.fetch_message(msg_id)
-                            await ctx.send("A setup is already running on this server. Please complete or cancel it first.")
+                            await ctx.send("Ein Setup läuft bereits auf diesem Server. Bitte schließe es ab oder brich es ab.")
                             return
                         except (discord.NotFound, discord.Forbidden):
                             pass
                 # Alte Nachricht existiert nicht mehr – Flag zurücksetzen
-                await self._reset_setup_flag(ctx.guild)
+                await self._reset_setup_flag(ctx.guild, clear_saved=False)
 
             saved = await self.config.guild(ctx.guild).saved_setup()
             if saved:
                 await self.config.guild(ctx.guild).setup_in_progress.set(True)
                 embed = discord.Embed(
-                    title=self.t(saved.get("data", {}).get("locale", "en-US"), "resume_title"),
-                    description=self.t(saved.get("data", {}).get("locale", "en-US"), "resume_desc"),
+                    title=self.t(saved.get("data", {}).get("locale", "de"), "resume_title"),
+                    description=self.t(saved.get("data", {}).get("locale", "de"), "resume_desc"),
                     color=discord.Color.blue(),
                 )
                 view = ResumeView(self, ctx.author, ctx.guild, saved)
@@ -215,15 +220,15 @@ class SetupWizardCog(commands.Cog):
 
             await self.start_fresh_setup(ctx)
         except Exception as e:
-            await self._reset_setup_flag(ctx.guild)
-            await ctx.send(f"❌ Error in setup: {e}")
+            await self._reset_setup_flag(ctx.guild, clear_saved=True)
+            await ctx.send(f"❌ Fehler im Setup: {e}")
 
     @commands.command(name="setupforce")
     @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
     async def setup_force(self, ctx: commands.Context):
         """Erzwingt einen Neustart des Wizards (löscht den aktuellen Status)."""
-        await self._reset_setup_flag(ctx.guild)
+        await self._reset_setup_flag(ctx.guild, clear_saved=True)
         await ctx.send("Setup-Status wurde zurückgesetzt. Starte Wizard...")
         await self.start_fresh_setup(ctx)
 
@@ -256,9 +261,10 @@ class SetupWizardCog(commands.Cog):
         await self.config.guild(guild).setup_message_id.set(message.id)
         await self.config.guild(guild).setup_channel_id.set(message.channel.id)
 
-    async def _reset_setup_flag(self, guild):
+    async def _reset_setup_flag(self, guild, clear_saved=False):
         await self.config.guild(guild).setup_in_progress.set(False)
-        await self.config.guild(guild).saved_setup.clear()
+        if clear_saved:
+            await self.config.guild(guild).saved_setup.clear()
         await self.config.guild(guild).setup_message_id.clear()
         await self.config.guild(guild).setup_channel_id.clear()
 
@@ -273,34 +279,38 @@ class SetupWizardCog(commands.Cog):
                     data[key] = data[key].value
             json_str = json.dumps(data, indent=4, default=str)
             file = discord.File(io.StringIO(json_str), filename="server_config.json")
-            await ctx.send(self.t(data.get("locale", "en-US"), "export_sent"), file=file)
+            await ctx.send(self.t(data.get("locale", "de"), "export_sent"), file=file)
         except Exception as e:
-            await ctx.send(f"❌ Export failed: {e}")
+            await ctx.send(f"❌ Export fehlgeschlagen: {e}")
 
     @commands.command(name="importsetup")
     @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
     async def import_setup(self, ctx: commands.Context):
         if not ctx.message.attachments:
-            return await ctx.send("Please attach a .json file.")
+            return await ctx.send("Bitte hänge eine .json Datei an.")
         attachment = ctx.message.attachments[0]
         try:
             content = await attachment.read()
             data = json.loads(content)
         except Exception:
-            return await ctx.send(self.t("en-US", "import_fail"))
+            return await ctx.send(self.t("de", "import_fail"))
         if not isinstance(data, dict):
-            return await ctx.send(self.t("en-US", "import_fail"))
+            return await ctx.send(self.t("de", "import_fail"))
         try:
             await self._apply_imported_settings(ctx.guild, data)
-            await ctx.send(self.t(data.get("locale", "en-US"), "import_success"))
+            await ctx.send(self.t(data.get("locale", "de"), "import_success"))
         except Exception as e:
-            await ctx.send(f"❌ Import failed: {e}")
+            await ctx.send(f"❌ Import fehlgeschlagen: {e}")
 
     async def _apply_imported_settings(self, guild: discord.Guild, data: dict):
         core_conf = getattr(self.bot, "core_config", None)
         if core_conf:
-            await safe_set(core_conf.guild(guild), "prefix", data.get("prefix"))
+            # FIX: Redbot erwartet Prefix als Liste
+            prefix = data.get("prefix")
+            if isinstance(prefix, str):
+                prefix = [prefix]
+            await safe_set(core_conf.guild(guild), "prefix", prefix)
             await safe_set(core_conf.guild(guild), "locale", data.get("locale"))
             await safe_set(core_conf.guild(guild), "regional_format", data.get("regional_format"))
             await safe_set(core_conf.guild(guild), "use_bot_color", data.get("use_bot_color", False))
@@ -335,8 +345,8 @@ class DataCollector:
 
     async def collect_all(self) -> Dict[str, Any]:
         data = {
-            "prefix": None,
-            "locale": None,
+            "prefix": ["!"],
+            "locale": "de",
             "regional_format": None,
             "use_bot_color": None,
             "embed_color": None,
@@ -353,7 +363,7 @@ class DataCollector:
         }
         core_conf = getattr(self.bot, "core_config", None)
         if core_conf:
-            data["prefix"] = await safe_get(core_conf.guild(self.guild), "prefix")
+            data["prefix"] = await safe_get(core_conf.guild(self.guild), "prefix") or ["!"]
             data["locale"] = await safe_get(core_conf.guild(self.guild), "locale") or "de"
             data["regional_format"] = await safe_get(core_conf.guild(self.guild), "regional_format")
             data["use_bot_color"] = await safe_get(core_conf.guild(self.guild), "use_bot_color", False)
@@ -395,11 +405,11 @@ class BaseStepView(View):
         self.guild = guild
         self.data = data
         self.message = message
-        self.locale = data.get("locale", "en-US")
+        self.locale = data.get("locale", "de")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
-            await interaction.response.send_message("❌ Not your session.", ephemeral=True)
+            await interaction.response.send_message("❌ Das ist nicht deine Sitzung.", ephemeral=True)
             return False
         return True
 
@@ -433,11 +443,12 @@ class BaseStepView(View):
             await interaction.response.edit_message(embed=embed, view=new_view)
 
     async def on_timeout(self):
+        # FIX: Speichere den Stand, aber lösche ihn NICHT gleich wieder
         await self.cog.config.guild(self.guild).saved_setup.set({
             "data": self.data,
             "step": self.step_number,
         })
-        await self.cog._reset_setup_flag(self.guild)
+        await self.cog._reset_setup_flag(self.guild, clear_saved=False)
         try:
             await self.message.edit(view=None)
         except discord.NotFound:
@@ -454,11 +465,11 @@ class ResumeView(View):
         self.guild = guild
         self.saved = saved
         self.message: Optional[discord.Message] = None
-        self.locale = saved["data"].get("locale", "en-US")
+        self.locale = saved["data"].get("locale", "de")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
-            await interaction.response.send_message("❌ Not your session.", ephemeral=True)
+            await interaction.response.send_message("❌ Das ist nicht deine Sitzung.", ephemeral=True)
             return False
         return True
 
@@ -467,18 +478,22 @@ class ResumeView(View):
 
     @discord.ui.button(label="Fortsetzen", style=discord.ButtonStyle.green)
     async def resume(self, interaction: discord.Interaction, button: Button):
-        await self.cog.config.guild(self.guild).saved_setup.clear()
+        # FIX: Nicht aus der Config löschen, nur Status aktualisieren
+        await self.cog.config.guild(self.guild).setup_in_progress.set(True)
+        await self.cog.config.guild(self.guild).setup_message_id.set(interaction.message.id)
+        await self.cog.config.guild(self.guild).setup_channel_id.set(interaction.message.channel.id)
+        
         data = self.saved["data"]
         step = self.saved["step"]
         step_map = {1: Step1GeneralView, 2: Step2RolesView, 3: Step3LogsView, 4: Step4ModerationView, 5: Step5FinalView}
         view_class = step_map.get(step, Step1GeneralView)
-        view = view_class(self.cog, self.author, self.guild, data, self.message)
+        view = view_class(self.cog, self.author, self.guild, data, interaction.message)
         embed = view.build_embed()
         await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Neu starten", style=discord.ButtonStyle.red)
     async def restart(self, interaction: discord.Interaction, button: Button):
-        await self.cog.config.guild(self.guild).saved_setup.clear()
+        await self.cog._reset_setup_flag(self.guild, clear_saved=True)
         await self.cog.start_fresh_setup(interaction)
 
 # -------------------------------------------------------------------
@@ -495,7 +510,7 @@ class StartView(View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
-            await interaction.response.send_message("❌ Not your session.", ephemeral=True)
+            await interaction.response.send_message("❌ Das ist nicht deine Sitzung.", ephemeral=True)
             return False
         return True
 
@@ -506,7 +521,7 @@ class StartView(View):
         await interaction.response.edit_message(embed=embed, view=next_view)
 
     async def on_timeout(self):
-        await self.cog._reset_setup_flag(self.guild)
+        await self.cog._reset_setup_flag(self.guild, clear_saved=False)
 
 # -------------------------------------------------------------------
 # Schritt 1: Allgemein
@@ -560,7 +575,7 @@ class Step1GeneralView(BaseStepView):
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
 
-        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=2)
+        btn_next = Button(label=self.t("next"), style=discord.ButtonStyle.green, row=1) # FIX: row=1 statt row=2
         btn_next.callback = self.next_step
         self.add_item(btn_next)
 
@@ -589,13 +604,19 @@ class Step1GeneralView(BaseStepView):
         await self.go_to_next(interaction, Step2RolesView)
 
     def build_embed(self) -> discord.Embed:
-        prefix = self.data.get("prefix", "!")
+        # FIX: Prefix korrekt als String formatieren, falls er eine Liste ist
+        prefix_val = self.data.get("prefix", ["!"])
+        if isinstance(prefix_val, list):
+            prefix = " ".join(f"`{p}`" for p in prefix_val)
+        else:
+            prefix = f"`{prefix_val}`"
+            
         color_hex = f"#{self.data.get('embed_color'):06x}" if isinstance(self.data.get("embed_color"), int) else "Default"
         locale_name = {"de": "Deutsch", "en-US": "English (US)", "en-GB": "English (UK)", "fr": "Français", "es": "Español", "it": "Italiano"}.get(self.data.get("locale"), "?")
         format_name = {"de": "TT.MM.JJJJ", "en-US": "MM/TT/JJJJ", "en-GB": "TT/MM/JJJJ", "fr": "JJJJ-MM-TT"}.get(self.data.get("regional_format"), "?")
         embed = discord.Embed(
             title=self.t("general_title"),
-            description=f"{self.t('general_current_prefix', prefix=prefix)}\n{self.t('general_current_locale', locale=locale_name)}\n{self.t('general_current_format', format=format_name)}\n{self.t('general_current_color', color=color_hex)}\n\n{self.t('general_example', prefix=prefix)}",
+            description=f"{self.t('general_current_prefix', prefix=prefix)}\n{self.t('general_current_locale', locale=locale_name)}\n{self.t('general_current_format', format=format_name)}\n{self.t('general_current_color', color=color_hex)}\n\n{self.t('general_example', prefix=prefix.replace('`', ''))}",
             color=discord.Color.blue(),
         )
         embed.set_footer(text=f"{self.t('progress_bar')} {self.progress_bar()}")
@@ -607,8 +628,14 @@ class PrefixModal(Modal, title="Prefix setzen"):
         super().__init__()
         self.view = view
     async def on_submit(self, interaction: discord.Interaction):
-        self.view.data["prefix"] = self.prefix_input.value.strip()
-        await interaction.response.send_message("✅ Prefix updated.", ephemeral=True)
+        # FIX: Redbot erwartet eine Liste für Prefixe
+        val = self.prefix_input.value.strip()
+        if "," in val:
+            self.view.data["prefix"] = [p.strip() for p in val.split(",") if p.strip()]
+        else:
+            self.view.data["prefix"] = [val]
+            
+        await interaction.response.send_message("✅ Prefix aktualisiert.", ephemeral=True)
         await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 class ColorModal(Modal, title="Embed-Farbe festlegen"):
@@ -627,9 +654,9 @@ class ColorModal(Modal, title="Embed-Farbe festlegen"):
                 self.view.data["embed_color"] = int(raw, 16)
                 self.view.data["use_bot_color"] = True
             except ValueError:
-                await interaction.response.send_message("❌ Invalid hex.", ephemeral=True)
+                await interaction.response.send_message("❌ Ungültiger Hex-Code.", ephemeral=True)
                 return
-        await interaction.response.send_message("✅ Color updated.", ephemeral=True)
+        await interaction.response.send_message("✅ Farbe aktualisiert.", ephemeral=True)
         await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 # -------------------------------------------------------------------
@@ -844,9 +871,9 @@ class AutoModModal(Modal, title="Auto-Mod Einstellungen"):
             if self.spam_detection.value.strip(): am["spam_detection"] = int(self.spam_detection.value)
             self.view.data["auto_mod"] = am
         except ValueError:
-            await interaction.response.send_message("❌ Invalid number.", ephemeral=True)
+            await interaction.response.send_message("❌ Ungültige Zahl.", ephemeral=True)
             return
-        await interaction.response.send_message("✅ Auto-Mod saved.", ephemeral=True)
+        await interaction.response.send_message("✅ Auto-Mod gespeichert.", ephemeral=True)
         await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 # -------------------------------------------------------------------
@@ -888,13 +915,17 @@ class Step5FinalView(BaseStepView):
         guild = self.guild
         core_conf = getattr(self.cog.bot, "core_config", None)
         if core_conf:
-            await safe_set(core_conf.guild(guild), "prefix", self.data["prefix"])
-            await safe_set(core_conf.guild(guild), "locale", self.data["locale"])
-            await safe_set(core_conf.guild(guild), "regional_format", self.data["regional_format"])
+            # FIX: Prefix als Liste sicherstellen
+            prefix = self.data.get("prefix")
+            if isinstance(prefix, str):
+                prefix = [prefix]
+            await safe_set(core_conf.guild(guild), "prefix", prefix)
+            await safe_set(core_conf.guild(guild), "locale", self.data.get("locale"))
+            await safe_set(core_conf.guild(guild), "regional_format", self.data.get("regional_format"))
             await safe_set(core_conf.guild(guild), "use_bot_color", self.data.get("use_bot_color", False))
-            await safe_set(core_conf.guild(guild), "embeds_disabled", self.data["embeds_disabled"])
-            await safe_set(core_conf.guild(guild), "admin_role", self.data["admin_role"])
-            await safe_set(core_conf.guild(guild), "mod_role", self.data["mod_role"])
+            await safe_set(core_conf.guild(guild), "embeds_disabled", self.data.get("embeds_disabled", False))
+            await safe_set(core_conf.guild(guild), "admin_role", self.data.get("admin_role"))
+            await safe_set(core_conf.guild(guild), "mod_role", self.data.get("mod_role"))
             if self.data.get("embed_color") is not None:
                 await safe_set(core_conf.guild(guild), "embed_color", self.data["embed_color"])
 
@@ -912,7 +943,7 @@ class Step5FinalView(BaseStepView):
             await safe_set(logs_cog.config.guild(guild), "serverlog_channel", self.data.get("serverlog_channel"))
             await safe_set(logs_cog.config.guild(guild), "messagelog_channel", self.data.get("messagelog_channel"))
 
-        await self.cog._reset_setup_flag(guild)
+        await self.cog._reset_setup_flag(guild, clear_saved=True)
         final_embed = discord.Embed(title=self.t("saved_title"), description=self.t("saved_desc"), color=discord.Color.green())
         self.clear_items()
         await interaction.response.edit_message(embed=final_embed, view=self)
