@@ -1,7 +1,8 @@
 """
-Cog: Vollständiger Setup-Assistent (robust gegen fehlende Cogs)
-- Fängt Config-Fehler von externen Cogs ab
-- Behebt 'modlog_channel is not a valid registered Group or value'
+Cog: Vollständiger Setup-Assistent (final)
+- Jump-Selects nutzen Liste (kein .split())
+- Standardsprache: Deutsch
+- Sichere Config-Zugriffe (safe_get/safe_set)
 """
 import discord
 from redbot.core import commands, Config
@@ -140,6 +141,21 @@ TEXTS = {
 }
 
 # -------------------------------------------------------------------
+# Hilfsfunktionen für sicheren Config-Zugriff
+# -------------------------------------------------------------------
+async def safe_get(group, key, default=None):
+    try:
+        return await group.get_raw(key)
+    except:
+        return default
+
+async def safe_set(group, key, value):
+    try:
+        await group.set_raw(key, value)
+    except:
+        pass
+
+# -------------------------------------------------------------------
 # Haupt-Cog
 # -------------------------------------------------------------------
 class SetupWizardCog(commands.Cog):
@@ -223,7 +239,10 @@ class SetupWizardCog(commands.Cog):
 
         await self.config.guild(guild).setup_in_progress.set(True)
         data = await DataCollector(self, guild).collect_all()
-        locale = data.get("locale", "en-US")
+        # Standardsprache Deutsch, wenn nichts gespeichert
+        if not data.get("locale"):
+            data["locale"] = "de"
+        locale = data["locale"]
 
         embed = discord.Embed(
             title=self.t(locale, "start_title"),
@@ -279,35 +298,34 @@ class SetupWizardCog(commands.Cog):
             await ctx.send(f"❌ Import failed: {e}")
 
     async def _apply_imported_settings(self, guild: discord.Guild, data: dict):
-        # Sichere Schreibweise für Core
         core_conf = getattr(self.bot, "core_config", None)
         if core_conf:
-            safe_set(core_conf.guild(guild), "prefix", data.get("prefix"))
-            safe_set(core_conf.guild(guild), "locale", data.get("locale"))
-            safe_set(core_conf.guild(guild), "regional_format", data.get("regional_format"))
-            safe_set(core_conf.guild(guild), "use_bot_color", data.get("use_bot_color", False))
-            safe_set(core_conf.guild(guild), "embeds_disabled", data.get("embeds_disabled", False))
-            safe_set(core_conf.guild(guild), "admin_role", data.get("admin_role"))
-            safe_set(core_conf.guild(guild), "mod_role", data.get("mod_role"))
+            await safe_set(core_conf.guild(guild), "prefix", data.get("prefix"))
+            await safe_set(core_conf.guild(guild), "locale", data.get("locale"))
+            await safe_set(core_conf.guild(guild), "regional_format", data.get("regional_format"))
+            await safe_set(core_conf.guild(guild), "use_bot_color", data.get("use_bot_color", False))
+            await safe_set(core_conf.guild(guild), "embeds_disabled", data.get("embeds_disabled", False))
+            await safe_set(core_conf.guild(guild), "admin_role", data.get("admin_role"))
+            await safe_set(core_conf.guild(guild), "mod_role", data.get("mod_role"))
             if "embed_color" in data and isinstance(data["embed_color"], int):
-                safe_set(core_conf.guild(guild), "embed_color", data["embed_color"])
+                await safe_set(core_conf.guild(guild), "embed_color", data["embed_color"])
 
         mod_cog = self.bot.get_cog("Mod")
         if mod_cog:
-            safe_set(mod_cog.config.guild(guild), "modlog_channel", data.get("modlog_channel"))
-            safe_set(mod_cog.config.guild(guild), "mute_role", data.get("mute_role"))
-            safe_set(mod_cog.config.guild(guild), "dm_on_kick", data.get("dm_on_kick", False))
-            safe_set(mod_cog.config.guild(guild), "dm_on_ban", data.get("dm_on_ban", False))
+            await safe_set(mod_cog.config.guild(guild), "modlog_channel", data.get("modlog_channel"))
+            await safe_set(mod_cog.config.guild(guild), "mute_role", data.get("mute_role"))
+            await safe_set(mod_cog.config.guild(guild), "dm_on_kick", data.get("dm_on_kick", False))
+            await safe_set(mod_cog.config.guild(guild), "dm_on_ban", data.get("dm_on_ban", False))
             if data.get("auto_mod"):
-                safe_set(mod_cog.config.guild(guild), "auto_mod", data["auto_mod"])
+                await safe_set(mod_cog.config.guild(guild), "auto_mod", data["auto_mod"])
 
         logs_cog = self.bot.get_cog("Logs")
         if logs_cog:
-            safe_set(logs_cog.config.guild(guild), "serverlog_channel", data.get("serverlog_channel"))
-            safe_set(logs_cog.config.guild(guild), "messagelog_channel", data.get("messagelog_channel"))
+            await safe_set(logs_cog.config.guild(guild), "serverlog_channel", data.get("serverlog_channel"))
+            await safe_set(logs_cog.config.guild(guild), "messagelog_channel", data.get("messagelog_channel"))
 
 # -------------------------------------------------------------------
-# Daten-Helfer (sichere Lesevorgänge)
+# Daten-Helfer
 # -------------------------------------------------------------------
 class DataCollector:
     def __init__(self, cog: SetupWizardCog, guild: discord.Guild):
@@ -333,11 +351,10 @@ class DataCollector:
             "dm_on_ban": False,
             "auto_mod": {},
         }
-        # Core Config (sicher lesen)
         core_conf = getattr(self.bot, "core_config", None)
         if core_conf:
             data["prefix"] = await safe_get(core_conf.guild(self.guild), "prefix")
-            data["locale"] = await safe_get(core_conf.guild(self.guild), "locale")
+            data["locale"] = await safe_get(core_conf.guild(self.guild), "locale") or "de"
             data["regional_format"] = await safe_get(core_conf.guild(self.guild), "regional_format")
             data["use_bot_color"] = await safe_get(core_conf.guild(self.guild), "use_bot_color", False)
             data["embeds_disabled"] = await safe_get(core_conf.guild(self.guild), "embeds_disabled", False)
@@ -349,7 +366,6 @@ class DataCollector:
             except:
                 data["embed_color"] = None
 
-        # Mod Cog
         mod_cog = self.bot.get_cog("Mod")
         if mod_cog:
             data["modlog_channel"] = await safe_get(mod_cog.config.guild(self.guild), "modlog_channel")
@@ -358,28 +374,12 @@ class DataCollector:
             data["dm_on_ban"] = await safe_get(mod_cog.config.guild(self.guild), "dm_on_ban", False)
             data["auto_mod"] = await safe_get(mod_cog.config.guild(self.guild), "auto_mod", {})
 
-        # Logs Cog
         logs_cog = self.bot.get_cog("Logs")
         if logs_cog:
             data["serverlog_channel"] = await safe_get(logs_cog.config.guild(self.guild), "serverlog_channel")
             data["messagelog_channel"] = await safe_get(logs_cog.config.guild(self.guild), "messagelog_channel")
 
         return data
-
-# -------------------------------------------------------------------
-# Sichere Config-Hilfsfunktionen
-# -------------------------------------------------------------------
-async def safe_get(group, key, default=None):
-    try:
-        return await group.get_raw(key)
-    except:
-        return default
-
-async def safe_set(group, key, value):
-    try:
-        await group.set_raw(key, value)
-    except:
-        pass  # Key nicht registriert oder anderer Fehler – ignorieren
 
 # -------------------------------------------------------------------
 # Basis-View
@@ -550,7 +550,12 @@ class Step1GeneralView(BaseStepView):
         sel_format.callback = self.regional_callback
         self.add_item(sel_format)
 
-        jump_options = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+        # Jump-Select – verwendet die Liste direkt
+        step_names = self.t("step_names")  # Liste
+        jump_options = [
+            discord.SelectOption(label=f"{i}. {name}", value=str(i))
+            for i, name in enumerate(step_names, 1)
+        ]
         sel_jump = Select(placeholder=self.t("jump_to"), options=jump_options)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
@@ -645,10 +650,16 @@ class Step2RolesView(BaseStepView):
             sel_mute = Select(placeholder="Mute-Rolle", options=self._role_options())
             sel_mute.callback = self.mute_select
             self.add_item(sel_mute)
-        jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+
+        step_names = self.t("step_names")
+        jump_opts = [
+            discord.SelectOption(label=f"{i}. {name}", value=str(i))
+            for i, name in enumerate(step_names, 1)
+        ]
         sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
+
         btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
@@ -712,10 +723,16 @@ class Step3LogsView(BaseStepView):
         sel_messagelog = Select(placeholder="Nachrichten-Log", options=self._channel_opts())
         sel_messagelog.callback = self.messagelog_cb
         self.add_item(sel_messagelog)
-        jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+
+        step_names = self.t("step_names")
+        jump_opts = [
+            discord.SelectOption(label=f"{i}. {name}", value=str(i))
+            for i, name in enumerate(step_names, 1)
+        ]
         sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
+
         btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
@@ -773,10 +790,16 @@ class Step4ModerationView(BaseStepView):
         btn_auto = Button(label=self.t("mod_auto"), style=discord.ButtonStyle.primary)
         btn_auto.callback = self.auto_mod_modal
         self.add_item(btn_auto)
-        jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+
+        step_names = self.t("step_names")
+        jump_opts = [
+            discord.SelectOption(label=f"{i}. {name}", value=str(i))
+            for i, name in enumerate(step_names, 1)
+        ]
         sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
+
         btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
@@ -827,7 +850,7 @@ class AutoModModal(Modal, title="Auto-Mod Einstellungen"):
         await self.view.message.edit(embed=self.view.build_embed(), view=self.view)
 
 # -------------------------------------------------------------------
-# Schritt 5: Final (jetzt mit sicheren Set-Aufrufen)
+# Schritt 5: Final
 # -------------------------------------------------------------------
 class Step5FinalView(BaseStepView):
     step_number = 5
@@ -837,10 +860,16 @@ class Step5FinalView(BaseStepView):
         btn_embeds = Button(label=f"{self.t('final_embeds')}: {self.t('on') if self.data.get('embeds_disabled') else self.t('off')}", style=discord.ButtonStyle.secondary)
         btn_embeds.callback = self.toggle_embeds
         self.add_item(btn_embeds)
-        jump_opts = [discord.SelectOption(label=f"{i}. {name}", value=str(i)) for i, name in enumerate(self.t("step_names").split(", "), 1)]
+
+        step_names = self.t("step_names")
+        jump_opts = [
+            discord.SelectOption(label=f"{i}. {name}", value=str(i))
+            for i, name in enumerate(step_names, 1)
+        ]
         sel_jump = Select(placeholder=self.t("jump_to"), options=jump_opts)
         sel_jump.callback = self.jump_callback
         self.add_item(sel_jump)
+
         btn_back = Button(label=self.t("back"), style=discord.ButtonStyle.grey, row=1)
         btn_back.callback = self.prev_step
         self.add_item(btn_back)
