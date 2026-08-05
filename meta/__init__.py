@@ -9,8 +9,8 @@ class MetaGamingSchutz(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210, force_registration=True)
-        # Speichert Whitelist, Timeout und ob der Schutz aktiv ist (Standard: True)
-        self.config.register_guild(whitelist=[], timeout_minutes=5, enabled=True)
+        # HIER IST DIE ÄNDERUNG: enabled=False (Standardmäßig aus)
+        self.config.register_guild(whitelist=[], timeout_minutes=5, enabled=False)
         
         # Interner Speicher für aktive Timer (member_id -> asyncio.Task)
         self.pending_tasks = {}
