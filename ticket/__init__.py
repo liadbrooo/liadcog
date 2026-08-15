@@ -1,6 +1,6 @@
 """
-SupportCog V15 - Ultimate High-End Ticket System für RedBot
-Fixes: Buttons freeze fix (no more thread locking), comprehensive DMs & Logs on all actions.
+SupportCog V16 - Ultimate High-End Ticket System für RedBot
+Fixes: ManageCats Interaction Fix (Bearbeiten-Button geht wieder), UX Verbesserung (Dropdowns zeigen aktuelle Werte an).
 """
 
 import discord
@@ -154,7 +154,12 @@ class BaseSetupView(discord.ui.View):
 
     def update_ui(self):
         self.clear_items()
-        log_sel = discord.ui.ChannelSelect(placeholder="Log-Channel", channel_types=[discord.ChannelType.text], custom_id="base_log")
+        
+        log_ph = "Log-Channel wählen"
+        if self.log_channel_id:
+            ch = self.ctx.guild.get_channel(self.log_channel_id)
+            if ch: log_ph = f"Log-Channel: {ch.name}"
+        log_sel = discord.ui.ChannelSelect(placeholder=log_ph, channel_types=[discord.ChannelType.text], custom_id="base_log")
         async def log_cb(inter: discord.Interaction):
             self.log_channel_id = log_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         log_sel.callback = log_cb; self.add_item(log_sel)
@@ -228,22 +233,39 @@ class CategorySetupView(discord.ui.View):
         async def emoji_cb(inter: discord.Interaction): await inter.response.send_modal(CategoryTextModal(self, "emoji", "Emoji", "Standard Emoji", max_len=10, required=False))
         btn_emoji.callback = emoji_cb; self.add_item(btn_emoji)
 
-        disc_cat_sel = discord.ui.ChannelSelect(placeholder="Discord Kategorie (für Channel-Typ)", channel_types=[discord.ChannelType.category], custom_id="cat_discord_cat", row=1)
+        # UX FIX: Dropdowns zeigen aktuell gewählte Werte an
+        disc_cat_ph = "Discord Kategorie (für Channel-Typ)"
+        if self.discord_category_id:
+            ch = self.ctx.guild.get_channel(self.discord_category_id)
+            if ch: disc_cat_ph = f"Kategorie: {ch.name}"
+        disc_cat_sel = discord.ui.ChannelSelect(placeholder=disc_cat_ph, channel_types=[discord.ChannelType.category], custom_id="cat_discord_cat", row=1)
         async def disc_cat_cb(inter: discord.Interaction):
             self.discord_category_id = disc_cat_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         disc_cat_sel.callback = disc_cat_cb; self.add_item(disc_cat_sel)
 
-        thread_par_sel = discord.ui.ChannelSelect(placeholder="Thread-Channel (für Thread-Typ)", channel_types=[discord.ChannelType.text], custom_id="cat_thread_par", row=2)
+        thread_par_ph = "Thread-Channel (für Thread-Typ)"
+        if self.thread_parent_id:
+            ch = self.ctx.guild.get_channel(self.thread_parent_id)
+            if ch: thread_par_ph = f"Thread-Channel: {ch.name}"
+        thread_par_sel = discord.ui.ChannelSelect(placeholder=thread_par_ph, channel_types=[discord.ChannelType.text], custom_id="cat_thread_par", row=2)
         async def thread_par_cb(inter: discord.Interaction):
             self.thread_parent_id = thread_par_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         thread_par_sel.callback = thread_par_cb; self.add_item(thread_par_sel)
 
-        staff_sel = discord.ui.RoleSelect(placeholder="Support-Rolle", custom_id="cat_staff_role", row=3)
+        staff_ph = "Support-Rolle wählen"
+        if self.staff_role_id:
+            r = self.ctx.guild.get_role(self.staff_role_id)
+            if r: staff_ph = f"Support: {r.name}"
+        staff_sel = discord.ui.RoleSelect(placeholder=staff_ph, custom_id="cat_staff_role", row=3)
         async def staff_cb(inter: discord.Interaction):
             self.staff_role_id = staff_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         staff_sel.callback = staff_cb; self.add_item(staff_sel)
 
-        high_sel = discord.ui.RoleSelect(placeholder="High-Team Rolle (Eskalation)", custom_id="cat_high_role", row=4)
+        high_ph = "High-Team Rolle (Eskalation)"
+        if self.high_team_role_id:
+            r = self.ctx.guild.get_role(self.high_team_role_id)
+            if r: high_ph = f"High-Team: {r.name}"
+        high_sel = discord.ui.RoleSelect(placeholder=high_ph, custom_id="cat_high_role", row=4)
         async def high_cb(inter: discord.Interaction):
             self.high_team_role_id = high_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         high_sel.callback = high_cb; self.add_item(high_sel)
@@ -380,13 +402,20 @@ class SupportCog(commands.Cog):
             btn_edit = discord.ui.Button(label="Bearbeiten", style=discord.ButtonStyle.primary, emoji="✏️")
             btn_del = discord.ui.Button(label="Löschen", style=discord.ButtonStyle.danger, emoji="🗑️")
             btn_back = discord.ui.Button(label="Abbrechen", style=discord.ButtonStyle.secondary, emoji="⬅️")
-            async def edit_cb(inter2):
+            
+            # HIER WAR DER FIX: Wir nutzen inter2.response.edit_message statt inter2.message.edit
+            async def edit_cb(inter2: discord.Interaction):
                 setup_view = CategorySetupView(self, ctx, cat_id=cat_id, cat_data=cat_data)
-                setup_view.message = await inter2.message.edit(embed=discord.Embed(title="✏️ Kategorie bearbeiten", description="Passe die Werte an und klicke auf 'Update durchführen'.", color=discord.Color.orange()), view=setup_view)
-            async def del_cb(inter2):
+                await inter2.response.edit_message(embed=discord.Embed(title="✏️ Kategorie bearbeiten", description="Passe die Werte an und klicke auf 'Update durchführen'.", color=discord.Color.orange()), view=setup_view)
+                setup_view.message = inter2.message
+                
+            async def del_cb(inter2: discord.Interaction):
                 del categories[cat_id]; await self.config.guild(ctx.guild).categories.set(categories); await self.update_panels(ctx.guild)
-                await inter2.message.edit(content=f"✅ Kategorie '{cat_data['name']}' wurde gelöscht.", embed=None, view=None)
-            async def back_cb(inter2): await inter2.message.delete()
+                await inter2.response.edit_message(content=f"✅ Kategorie '{cat_data['name']}' wurde gelöscht.", embed=None, view=None)
+                
+            async def back_cb(inter2: discord.Interaction):
+                await inter2.response.edit_message(content="Abgebrochen.", embed=None, view=None)
+                
             btn_edit.callback = edit_cb; btn_del.callback = del_cb; btn_back.callback = back_cb
             ed_view.add_item(btn_edit); ed_view.add_item(btn_del); ed_view.add_item(btn_back)
             await inter.response.edit_message(content=f"Ausgewählt: **{cat_data['name']}**. Was möchtest du tun?", embed=None, view=ed_view)
@@ -734,7 +763,6 @@ class SupportCog(commands.Cog):
         html_content = HTML_TEMPLATE.format(channel_name=channel.name, created_at=channel.created_at.strftime("%d.%m.%Y %H:%M"), closed_at=datetime.datetime.now().strftime("%d.%m.%Y %H:%M"), close_reason=discord.utils.escape_html(reason), messages_html=messages_html)
         transcript_file = discord.File(io.StringIO(html_content), filename=f"transcript-{channel.id}.html")
 
-        # Log Embed with Transcript
         log_embed = discord.Embed(title="Ticket geschlossen" + (" (Auto-Close)" if is_auto else ""), color=discord.Color.red(), timestamp=datetime.datetime.now())
         log_embed.add_field(name="Geschlossen von", value="System" if is_auto else f"{user.mention} (`{user.id}`)")
         log_embed.add_field(name="Channel", value=channel.name)
