@@ -1,6 +1,5 @@
 """
 SupportCog V12 - Ultimate High-End Ticket System für RedBot
-Neu: Kategorie Verwaltung (Bearbeiten & Löschen).
 """
 
 import discord
@@ -14,7 +13,6 @@ import asyncio
 
 log = logging.getLogger("red.supportcog")
 
-# --- HTML TEMPLATE FÜR TRANSCRIPT ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="de">
@@ -56,7 +54,6 @@ MESSAGE_HTML = """
 </div>
 """
 
-# --- UI VIEWS ---
 class TicketPanelView(discord.ui.View):
     def __init__(self, cog: "SupportCog"):
         super().__init__(timeout=None)
@@ -143,7 +140,6 @@ class TicketModal(discord.ui.Modal, title='🎫 Ticket erstellen'):
     issue = discord.ui.TextInput(label='Was ist dein Anliegen?', placeholder='Bitte beschreibe dein Problem kurz...', style=discord.TextStyle.paragraph, required=True, min_length=10, max_length=1000)
     async def on_submit(self, interaction: discord.Interaction): await self.cog.create_ticket(interaction, self.cat_id, self.issue.value)
 
-# --- SETUP WIZARDS ---
 class BaseSetupView(discord.ui.View):
     def __init__(self, cog: "SupportCog", ctx: commands.Context):
         super().__init__(timeout=300); self.cog = cog; self.ctx = ctx
@@ -253,7 +249,6 @@ class CategoryTextModal(discord.ui.Modal):
         if self.attr_name == "emoji" and not self.text_input.value: self.wizard.emoji = "🎫"
         self.wizard.update_ui(); await interaction.response.send_message("Wert aktualisiert!", ephemeral=True); await self.wizard.message.edit(view=self.wizard)
 
-# --- MAIN COG ---
 class SupportCog(commands.Cog):
     def __init__(self, bot: Red):
         self.bot = bot
@@ -336,7 +331,6 @@ class SupportCog(commands.Cog):
 
     @ticket_cmd.command(name="managecats")
     async def ticket_managecats(self, ctx: commands.Context):
-        """Verwalte (Bearbeiten/Löschen) bestehende Kategorien."""
         categories = await self.config.guild(ctx.guild).categories()
         if not categories:
             return await ctx.send("❌ Es existieren noch keine Kategorien.")
@@ -447,7 +441,6 @@ class SupportCog(commands.Cog):
         await ctx.channel.edit(name=new_name[:100])
         await ctx.send(f"✅ Umbenannt in `{new_name[:100]}`.")
 
-    # --- CORE LOGIC ---
     async def create_panel(self, channel: discord.TextChannel):
         guild = channel.guild
         categories = await self.config.guild(guild).categories()
@@ -513,7 +506,6 @@ class SupportCog(commands.Cog):
         await interaction.response.edit_message(content=f"✅ Kategorie '{wizard.name}' {action}! Alle Panels wurden aktualisiert.", embed=None, view=None)
 
     async def add_role_to_thread_silently(self, thread: discord.Thread, role: discord.Role):
-        """Fügt Mitglieder einer Rolle zu einem Thread hinzu, OHNE sie zu pingen."""
         for member in role.members:
             try: await thread.add_user(member)
             except: pass
