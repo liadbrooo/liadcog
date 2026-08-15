@@ -1,6 +1,6 @@
 """
-SupportCog V17 - Ultimate High-End Ticket System für RedBot
-Fixes: Entfernung des globalen Ticket-Typ Schalters. System entscheidet nun pro Kategorie (Channel ODER Thread).
+SupportCog V17.1 - Ultimate High-End Ticket System für RedBot
+Fixes: Row-Layout Fix für Kategorie-Setup (keine UI Fehler mehr), intelligente Channel/Thread Erkennung pro Kategorie.
 """
 
 import discord
@@ -159,29 +159,29 @@ class BaseSetupView(discord.ui.View):
         if self.log_channel_id:
             ch = self.ctx.guild.get_channel(self.log_channel_id)
             if ch: log_ph = f"Log-Channel: {ch.name}"
-        log_sel = discord.ui.ChannelSelect(placeholder=log_ph, channel_types=[discord.ChannelType.text], custom_id="base_log")
+        log_sel = discord.ui.ChannelSelect(placeholder=log_ph, channel_types=[discord.ChannelType.text], custom_id="base_log", row=0)
         async def log_cb(inter: discord.Interaction):
             self.log_channel_id = log_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         log_sel.callback = log_cb; self.add_item(log_sel)
 
-        btn_dm = discord.ui.Button(label=f"DMs: {'AN' if self.dm_notifications else 'AUS'}", style=discord.ButtonStyle.success if self.dm_notifications else discord.ButtonStyle.danger, emoji='✉️')
+        btn_dm = discord.ui.Button(label=f"DMs: {'AN' if self.dm_notifications else 'AUS'}", style=discord.ButtonStyle.success if self.dm_notifications else discord.ButtonStyle.danger, emoji='✉️', row=1)
         async def dm_cb(inter: discord.Interaction):
             self.dm_notifications = not self.dm_notifications; self.update_ui(); await inter.response.edit_message(view=self)
         btn_dm.callback = dm_cb; self.add_item(btn_dm)
 
-        btn_auto = discord.ui.Button(label=f"Auto-Close: {self.autoclose_hours}h", style=discord.ButtonStyle.secondary, emoji='⏳')
+        btn_auto = discord.ui.Button(label=f"Auto-Close: {self.autoclose_hours}h", style=discord.ButtonStyle.secondary, emoji='⏳', row=1)
         async def auto_cb(inter: discord.Interaction): await inter.response.send_modal(SimpleNumberModal(self, "autoclose_hours", "Auto-Close (Stunden)", 0, 500))
         btn_auto.callback = auto_cb; self.add_item(btn_auto)
 
-        btn_cool = discord.ui.Button(label=f"Cooldown: {self.cooldown_minutes}m", style=discord.ButtonStyle.secondary, emoji='❄️')
+        btn_cool = discord.ui.Button(label=f"Cooldown: {self.cooldown_minutes}m", style=discord.ButtonStyle.secondary, emoji='❄️', row=1)
         async def cool_cb(inter: discord.Interaction): await inter.response.send_modal(SimpleNumberModal(self, "cooldown_minutes", "Cooldown (Minuten)", 0, 10080))
         btn_cool.callback = cool_cb; self.add_item(btn_cool)
 
-        btn_max = discord.ui.Button(label=f"Max Tickets/User: {self.max_tickets_per_user}", style=discord.ButtonStyle.secondary, emoji='🔢')
+        btn_max = discord.ui.Button(label=f"Max Tickets: {self.max_tickets_per_user}", style=discord.ButtonStyle.secondary, emoji='🔢', row=1)
         async def max_cb(inter: discord.Interaction): await inter.response.send_modal(SimpleNumberModal(self, "max_tickets_per_user", "Max Tickets pro User", 1, 10))
         btn_max.callback = max_cb; self.add_item(btn_max)
 
-        btn_finish = discord.ui.Button(label="Setup abschließen", style=discord.ButtonStyle.success, emoji='✅')
+        btn_finish = discord.ui.Button(label="Setup abschließen", style=discord.ButtonStyle.success, emoji='✅', row=2)
         async def finish_cb(inter: discord.Interaction):
             if not self.log_channel_id: return await inter.response.send_message("Bitte wähle zuerst einen Log-Channel aus!", ephemeral=True)
             await self.cog.finish_base_setup(inter, self); self.stop()
@@ -212,22 +212,32 @@ class CategorySetupView(discord.ui.View):
 
     def update_ui(self):
         self.clear_items()
-        btn_name = discord.ui.Button(label=f"Name: {self.name}" if self.name else "Name setzen", style=discord.ButtonStyle.primary, custom_id="cat_name")
+        
+        # REIHE 0: Alle Buttons (verkürzte Texte für besseres Layout)
+        btn_name = discord.ui.Button(label=f"Name" if not self.name else f"Name ✅", style=discord.ButtonStyle.primary, custom_id="cat_name", row=0)
         async def name_cb(inter: discord.Interaction): await inter.response.send_modal(CategoryTextModal(self, "name", "Name der Kategorie", "z.B. Allgemeiner Support", max_len=50))
         btn_name.callback = name_cb; self.add_item(btn_name)
 
-        btn_desc = discord.ui.Button(label="Beschreibung setzen" if not self.description else "Beschreibung gesetzt", style=discord.ButtonStyle.secondary, custom_id="cat_desc")
+        btn_desc = discord.ui.Button(label="Beschreibung" if not self.description else "Besch. ✅", style=discord.ButtonStyle.secondary, custom_id="cat_desc", row=0)
         async def desc_cb(inter: discord.Interaction): await inter.response.send_modal(CategoryTextModal(self, "description", "Beschreibung", "Wofür ist diese Kategorie?", max_len=100))
         btn_desc.callback = desc_cb; self.add_item(btn_desc)
 
-        btn_abbr = discord.ui.Button(label=f"Abkürzung: {self.abbr}" if self.abbr else "Abkürzung setzen", style=discord.ButtonStyle.secondary, custom_id="cat_abbr")
+        btn_abbr = discord.ui.Button(label=f"Abkürzung" if not self.abbr else f"Abbr: {self.abbr}", style=discord.ButtonStyle.secondary, custom_id="cat_abbr", row=0)
         async def abbr_cb(inter: discord.Interaction): await inter.response.send_modal(CategoryTextModal(self, "abbr", "Channel-Abkürzung", "z.B. SUP", max_len=10))
         btn_abbr.callback = abbr_cb; self.add_item(btn_abbr)
 
-        btn_emoji = discord.ui.Button(label=f"Emoji: {self.emoji}", style=discord.ButtonStyle.secondary, custom_id="cat_emoji")
+        btn_emoji = discord.ui.Button(label=f"Emoji: {self.emoji}", style=discord.ButtonStyle.secondary, custom_id="cat_emoji", row=0)
         async def emoji_cb(inter: discord.Interaction): await inter.response.send_modal(CategoryTextModal(self, "emoji", "Emoji", "Standard Emoji", max_len=10, required=False))
         btn_emoji.callback = emoji_cb; self.add_item(btn_emoji)
 
+        btn_save = discord.ui.Button(label="Save" if not self.cat_id else "Update", style=discord.ButtonStyle.success, emoji='✅', row=0)
+        async def save_cb(inter: discord.Interaction):
+            if not all([self.name, self.abbr, self.staff_role_id]): return await inter.response.send_message("Bitte fülle Name, Abkürzung und Support-Rolle aus!", ephemeral=True)
+            if not self.discord_category_id and not self.thread_parent_id: return await inter.response.send_message("Bitte wähle entweder eine Discord Kategorie ODER einen Thread-Channel aus!", ephemeral=True)
+            await self.cog.save_category(inter, self, self.cat_id); self.stop()
+        btn_save.callback = save_cb; self.add_item(btn_save)
+
+        # REIHE 1: Discord Kategorie
         disc_cat_ph = "Discord Kategorie (für Channel-Typ)"
         if self.discord_category_id:
             ch = self.ctx.guild.get_channel(self.discord_category_id)
@@ -237,6 +247,7 @@ class CategorySetupView(discord.ui.View):
             self.discord_category_id = disc_cat_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         disc_cat_sel.callback = disc_cat_cb; self.add_item(disc_cat_sel)
 
+        # REIHE 2: Thread Parent Channel
         thread_par_ph = "Thread-Channel (für Thread-Typ)"
         if self.thread_parent_id:
             ch = self.ctx.guild.get_channel(self.thread_parent_id)
@@ -246,6 +257,7 @@ class CategorySetupView(discord.ui.View):
             self.thread_parent_id = thread_par_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         thread_par_sel.callback = thread_par_cb; self.add_item(thread_par_sel)
 
+        # REIHE 3: Support Rolle
         staff_ph = "Support-Rolle wählen"
         if self.staff_role_id:
             r = self.ctx.guild.get_role(self.staff_role_id)
@@ -255,6 +267,7 @@ class CategorySetupView(discord.ui.View):
             self.staff_role_id = staff_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         staff_sel.callback = staff_cb; self.add_item(staff_sel)
 
+        # REIHE 4: High-Team Rolle
         high_ph = "High-Team Rolle (Eskalation)"
         if self.high_team_role_id:
             r = self.ctx.guild.get_role(self.high_team_role_id)
@@ -263,13 +276,6 @@ class CategorySetupView(discord.ui.View):
         async def high_cb(inter: discord.Interaction):
             self.high_team_role_id = high_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         high_sel.callback = high_cb; self.add_item(high_sel)
-
-        btn_save = discord.ui.Button(label="Kategorie speichern" if not self.cat_id else "Update durchführen", style=discord.ButtonStyle.success, emoji='✅', row=4)
-        async def save_cb(inter: discord.Interaction):
-            if not all([self.name, self.abbr, self.staff_role_id]): return await inter.response.send_message("Bitte fülle Name, Abkürzung und Support-Rolle aus!", ephemeral=True)
-            if not self.discord_category_id and not self.thread_parent_id: return await inter.response.send_message("Bitte wähle entweder eine Discord Kategorie ODER einen Thread-Channel aus!", ephemeral=True)
-            await self.cog.save_category(inter, self, self.cat_id); self.stop()
-        btn_save.callback = save_cb; self.add_item(btn_save)
 
 class CategoryTextModal(discord.ui.Modal):
     def __init__(self, wizard: CategorySetupView, attr_name: str, title: str, placeholder: str, max_len: int, required: bool = True):
