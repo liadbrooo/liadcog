@@ -1,6 +1,6 @@
 """
-SupportCog V6 - High-End Ticket System für RedBot
-Features: Persistent Dropdown Panel, Defer-Fixes (keine Interaction-Fehler mehr), Auto-Close im Setup, Advanced Escalation, Review System.
+SupportCog V7 - High-End Ticket System für RedBot
+Fixes: Dropdown wird garantiert geladen, Auto-Close Logik stabiler, keine Interaction-Fehler mehr.
 """
 
 import discord
@@ -65,9 +65,13 @@ class TicketPanelView(discord.ui.View):
     @discord.ui.select(
         placeholder="🎫 Wähle hier eine Kategorie für dein Ticket aus...",
         custom_id='support_ticket_create_select',
-        min_values=1, max_values=1
+        min_values=1, max_values=1,
+        options=[discord.SelectOption(label="Lädt...", value="loading")] # DUMMY OPTION, SONST ZEIGT DISCORD ES NICHT AN
     )
     async def create_ticket_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if select.values[0] == "loading":
+            return await interaction.response.send_message("Bitte warte noch einen Moment, das Panel wird aktualisiert...", ephemeral=True)
+            
         config = await self.cog.config.guild(interaction.guild).all()
         categories = config.get("categories", {})
         cat_id = select.values[0]
@@ -92,7 +96,7 @@ class CloseTicketModal(discord.ui.Modal, title='🔒 Ticket schließen'):
 
     async def on_submit(self, interaction: discord.Interaction):
         reason_str = self.reason.value if self.reason.value else "Kein Grund angegeben"
-        await self.cog.close_ticket(interaction, reason_str)
+        await self.cog.close_ticket(interaction.channel, reason_str, interaction.user)
 
 class TicketControlView(discord.ui.View):
     def __init__(self, cog: "SupportCog"):
@@ -231,7 +235,6 @@ class CategorySetupView(discord.ui.View):
         self.description = None
         self.emoji = "🎫"
         self.abbr = "TICKET"
-        self.button_color = "Blurple"
         self.discord_category_id = None
         self.staff_role_id = None
         self.high_team_role_id = None
@@ -387,8 +390,7 @@ class SupportCog(commands.Cog):
                             continue
                         last_msg = datetime.datetime.fromisoformat(last_msg_str)
                         if (datetime.datetime.now() - last_msg).total_seconds() > (autoclose_hours * 3600):
-                            fake_inter = type("FakeInter", (), {"channel": channel, "guild": guild, "user": guild.me})()
-                            await self.close_ticket(fake_inter, "Inaktivität (Auto-Close)", is_auto=True)
+                            await self.close_ticket(channel, "Inaktivität (Auto-Close)", guild.me, is_auto=True)
                             changed = True
                     if changed:
                         await self.config.guild(guild).active_tickets.set(tickets)
@@ -421,8 +423,11 @@ class SupportCog(commands.Cog):
     @ticket_cmd.command(name="refresh")
     async def ticket_refresh(self, ctx: commands.Context):
         """Aktualisiert das Panel (z.B. wenn neue Kategorien hinzugefügt wurden)."""
-        await self.update_panel(ctx.guild)
-        await ctx.send("✅ Panel wurde aktualisiert.")
+        success = await self.update_panel(ctx.guild)
+        if success:
+            await ctx.send("✅ Panel wurde aktualisiert.")
+        else:
+            await ctx.send("❌ Panel nicht gefunden. Bitte führe `[p]ticket setup` aus.")
 
     @commands.command(name="tadd")
     @commands.guild_only()
@@ -459,38 +464,40 @@ class SupportCog(commands.Cog):
         config = await self.config.guild(guild).all()
         panel_channel = guild.get_channel(config["panel_channel_id"])
         panel_msg_id = config["panel_message_id"]
-        if not panel_channel or not panel_msg_id: return
+        if not panel_channel or not panel_msg_id: return False
         
         try:
             msg = await panel_channel.fetch_message(panel_msg_id)
-        except:
-            return
+        except discord.NotFound:
+            return False
 
         categories = config.get("categories", {})
         options = []
         for cat_id, cat_data in categories.items():
             options.append(discord.SelectOption(
                 label=cat_data["name"][:100], value=cat_id,
-                description=cat_data.get("description", "")[:100], emoji=cat_data.get("emoji")
+                description=cat_data.get("description", "")[:100] if cat_data.get("description") else None, 
+                emoji=cat_data.get("emoji")
             ))
 
         embed = discord.Embed(
             title="🎫 Support Ticket System",
-            description="Brauchst du Hilfe? Wähle oben im Dropdown-Menü die passende Kategorie aus, um ein privates Ticket zu eröffnen.\n\n⚠️ **Wichtig:** Sobald ein Ticket geschlossen wird, wird der Chatverlauf als HTML-Transkript gespeichert.",
+            description="Brauchst du Hilfe? Wähle unten im Dropdown-Menü die passende Kategorie aus, um ein privates Ticket zu eröffnen.\n\n⚠️ **Wichtig:** Sobald ein Ticket geschlossen wird, wird der Chatverlauf als HTML-Transkript gespeichert.",
             color=discord.Color.blurple()
         )
         embed.set_footer(text=f"{guild.name} Support Team")
         
         view = TicketPanelView(self)
         if options:
-            select_item = view.children[0]
-            select_item.options = options
+            for child in view.children:
+                if isinstance(child, discord.ui.Select):
+                    child.options = options
         else:
-            # Wenn keine Kategorien da sind, Dropdown leeren
             view.clear_items()
             embed.add_field(name="⚠️ Hinweis", value="Es wurden noch keine Kategorien erstellt. Ein Admin muss mit `[p]ticket addcat` Kategorien anlegen und dann `[p]ticket refresh` nutzen.")
 
         await msg.edit(embed=embed, view=view)
+        return True
 
     async def finish_base_setup(self, interaction: discord.Interaction, wizard: BaseSetupView):
         guild = interaction.guild
@@ -504,18 +511,19 @@ class SupportCog(commands.Cog):
         
         embed = discord.Embed(
             title="🎫 Support Ticket System",
-            description="Brauchst du Hilfe? Wähle oben im Dropdown-Menü die passende Kategorie aus.\n\n⚠️ **Wichtig:** Sobald ein Ticket geschlossen wird, wird der Chatverlauf als Transkript gespeichert.",
+            description="Brauchst du Hilfe? Wähle unten im Dropdown-Menü die passende Kategorie aus.\n\n⚠️ **Wichtig:** Sobald ein Ticket geschlossen wird, wird der Chatverlauf als Transkript gespeichert.",
             color=discord.Color.blurple()
         )
         embed.set_footer(text=f"{guild.name} Support Team")
+        embed.add_field(name="⚠️ Hinweis", value="Es wurden noch keine Kategorien erstellt. Ein Admin muss mit `[p]ticket addcat` Kategorien anlegen.")
         
         view = TicketPanelView(self)
-        # Noch keine Kategorien, also Dropdown entfernen fürs erste
-        view.clear_items()
+        view.clear_items() # Leeres Panel posten, damit es nicht crashed
         
         panel_msg = await panel_channel.send(embed=embed, view=view)
         await self.config.guild(guild).panel_message_id.set(panel_msg.id)
-        await interaction.response.edit_message(content=f"✅ Basis-Setup abgeschlossen! Panel gepostet in {panel_channel.mention}.\n\n**Wichtig:** Erstelle jetzt mit `[p]ticket addcat` deine Kategorien und führe danach `[p]ticket refresh` aus, um das Dropdown sichtbar zu machen!", embed=None, view=None)
+        
+        await interaction.response.edit_message(content=f"✅ Basis-Setup abgeschlossen! Panel gepostet in {panel_channel.mention}.\n\n**Wichtig:** Erstelle jetzt mit `[p]ticket addcat` deine Kategorien. Das Panel wird danach automatisch aktualisiert!", embed=None, view=None)
 
     async def save_category(self, interaction: discord.Interaction, wizard: CategorySetupView):
         guild = interaction.guild
@@ -528,12 +536,12 @@ class SupportCog(commands.Cog):
         }
         await self.config.guild(guild).categories.set(categories)
         
-        # Panel automatisch updaten
-        await self.update_panel(guild)
-        await interaction.response.edit_message(content=f"✅ Kategorie '{wizard.name}' gespeichert! Das Panel wurde automatisch aktualisiert.", embed=None, view=None)
+        updated = await self.update_panel(guild)
+        msg_text = f"✅ Kategorie '{wizard.name}' gespeichert! Das Panel wurde automatisch aktualisiert." if updated else f"✅ Kategorie '{wizard.name}' gespeichert! Nutze `[p]ticket refresh`, um das Panel zu aktualisieren."
+        await interaction.response.edit_message(content=msg_text, embed=None, view=None)
 
     async def create_ticket(self, interaction: discord.Interaction, cat_id: str, issue: str):
-        await interaction.response.defer(ephemeral=True) # FIX FÜR "INTERACTION FAILED"
+        await interaction.response.defer(ephemeral=True)
         
         guild = interaction.guild
         user = interaction.user
@@ -574,7 +582,7 @@ class SupportCog(commands.Cog):
         await interaction.followup.send(f"✅ Dein Ticket wurde erstellt: {ticket_channel.mention}", ephemeral=True)
 
     async def claim_ticket(self, interaction: discord.Interaction, view: TicketControlView):
-        await interaction.response.defer(ephemeral=True) # DEFER FÜR STABILITÄT
+        await interaction.response.defer(ephemeral=True)
         
         channel = interaction.channel
         guild = interaction.guild
@@ -676,18 +684,12 @@ class SupportCog(commands.Cog):
                 break
         await self.config.guild(guild).active_tickets.set(config["active_tickets"])
 
-    async def close_ticket(self, interaction: discord.Interaction, reason: str, is_auto: bool = False):
-        if hasattr(interaction, "response"):
-            await interaction.response.defer(ephemeral=True)
-            
-        channel = interaction.channel if hasattr(interaction, "channel") else interaction.channel
+    async def close_ticket(self, channel: discord.TextChannel, reason: str, user: discord.Member, is_auto: bool = False):
         guild = channel.guild
         config = await self.config.guild(guild).all()
         ticket_data = next((t for t in config["active_tickets"] if t["channel_id"] == channel.id), None)
         
-        if not ticket_data:
-            if hasattr(interaction, "followup"): await interaction.followup.send("❌ Dies ist kein aktives Ticket.", ephemeral=True)
-            return
+        if not ticket_data: return
 
         log_channel = guild.get_channel(config["log_channel_id"])
         messages_html = ""
@@ -709,7 +711,7 @@ class SupportCog(commands.Cog):
 
         log_embed = discord.Embed(title="Ticket geschlossen" + (" (Auto-Close)" if is_auto else ""), color=discord.Color.red(), timestamp=datetime.datetime.now())
         if is_auto: log_embed.add_field(name="Geschlossen von", value="System (Inaktivität)")
-        else: log_embed.add_field(name="Geschlossen von", value=f"{interaction.user.mention} (`{interaction.user.id}`)")
+        else: log_embed.add_field(name="Geschlossen von", value=f"{user.mention} (`{user.id}`)")
         log_embed.add_field(name="Channel Name", value=channel.name)
         log_embed.add_field(name="Grund", value=reason, inline=False)
         if log_channel: await log_channel.send(embed=log_embed, file=transcript_file)
