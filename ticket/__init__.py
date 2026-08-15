@@ -366,11 +366,17 @@ class SupportCog(commands.Cog):
         }
         
         self.config.register_guild(**default_guild)
-        
+        self.autoclose_task = None
+
+    async def cog_load(self):
+        # WICHTIG: Views und Tasks erst beim Laden registrieren, nicht im __init__
         self.bot.add_view(TicketPanelView(self))
         self.bot.add_view(TicketControlView(self))
-        
-        self.bot.loop.create_task(self.autoclose_loop())
+        self.autoclose_task = self.bot.loop.create_task(self.autoclose_loop())
+
+    def cog_unload(self):
+        if self.autoclose_task:
+            self.autoclose_task.cancel()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -456,7 +462,6 @@ class SupportCog(commands.Cog):
         await self.config.guild(ctx.guild).autoclose_hours.set(hours)
         await ctx.send(f"✅ Auto-Close auf {hours} Stunden gesetzt." if hours > 0 else "✅ Auto-Close deaktiviert.")
 
-    # User Management Commands
     @commands.command(name="tadd")
     @commands.guild_only()
     async def ticket_add(self, ctx: commands.Context, user: discord.Member):
@@ -583,13 +588,11 @@ class SupportCog(commands.Cog):
         staff_role = guild.get_role(staff_role_id)
 
         if ticket_data["claimed_by"] is None:
-            # CLAIM
             ticket_data["claimed_by"] = interaction.user.id
             if staff_role:
                 overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True)
             overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             
-            # Update Button Label
             for child in view.children:
                 if child.custom_id == "support_ticket_claim_btn":
                     child.label = "Freigeben"
@@ -598,7 +601,6 @@ class SupportCog(commands.Cog):
             await interaction.response.edit_message(view=view)
             await channel.send(f"✅ {interaction.user.mention} hat das Ticket übernommen. Das Team kann nun nur noch mitlesen.")
         else:
-            # RELEASE
             if ticket_data["claimed_by"] != interaction.user.id and not interaction.user.guild_permissions.manage_guild:
                 return await interaction.response.send_message("❌ Nur die Person, die übernommen hat, kann das Ticket freigeben.", ephemeral=True)
 
@@ -617,7 +619,6 @@ class SupportCog(commands.Cog):
             await channel.send("✅ Das Ticket wurde wieder freigegeben. Jeder Supporter kann sich nun darum kümmern.")
 
         await channel.edit(overwrites=overwrites)
-        # Config updaten
         for i, t in enumerate(tickets):
             if t["channel_id"] == channel.id:
                 tickets[i] = ticket_data
@@ -644,7 +645,7 @@ class SupportCog(commands.Cog):
 
         overwrites = channel.overwrites
         if staff_role:
-            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=False) # Normalen Team Zugriff entziehen
+            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=False)
         
         overwrites[high_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
         if creator:
@@ -652,28 +653,20 @@ class SupportCog(commands.Cog):
             
         await channel.edit(overwrites=overwrites)
 
-        # Button deaktivieren
         for child in view.children:
             if child.custom_id == "support_ticket_escalate_btn":
                 child.disabled = True
         await interaction.response.edit_message(view=view)
 
-        # Claim Button entfernen, da eskaliert
         ticket_data["escalated"] = True
         ticket_data["claimed_by"] = None
-        if staff_role:
-            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=False)
-        await channel.edit(overwrites=overwrites)
-
         await channel.send(f"⚠️ **Ticket eskaliert!** {interaction.user.mention} hat das High-Team ({high_role.mention}) hinzugezogen. Der Zugriff für das normale Team wurde entzogen.")
 
-        # Config updaten
-        tickets = config["active_tickets"]
-        for i, t in enumerate(tickets):
+        for i, t in enumerate(config["active_tickets"]):
             if t["channel_id"] == channel.id:
-                tickets[i] = ticket_data
+                config["active_tickets"][i] = ticket_data
                 break
-        await self.config.guild(guild).active_tickets.set(tickets)
+        await self.config.guild(guild).active_tickets.set(config["active_tickets"])
 
     async def close_ticket(self, interaction: discord.Interaction, reason: str, is_auto: bool = False):
         channel = interaction.channel if hasattr(interaction, "channel") else interaction.channel
@@ -724,10 +717,6 @@ class SupportCog(commands.Cog):
         if is_auto:
             await self.delete_ticket_channel(channel, ticket_data, 0)
         else:
-            # Buttons deaktivieren
-            view = TicketControlView(self)
-            for child in view.children: child.disabled = True
-            # Wir können die alte Nachricht nicht perfekt editieren ohne die alte View Instanz, daher senden wir eine neue Review Nachricht
             msg = await channel.send(embed=discord.Embed(title="⭐ Support Bewerten", description="Das Ticket wurde geschlossen. Wie würdest du den Support bewerten?", color=discord.Color.gold()), view=ReviewView(self, ticket_data))
             msg.view.message = msg
 
@@ -754,3 +743,7 @@ class SupportCog(commands.Cog):
         """Setzt die Konfiguration des Ticket-Systems zurück."""
         await self.config.guild(ctx.guild).clear()
         await ctx.send("✅ Die Ticket-Konfiguration wurde komplett zurückgesetzt.")
+
+# DIESE FUNKTION IST ZWINGEND ERFORDERLICH FÜR REDBOT!
+async def setup(bot):
+    await bot.add_cog(SupportCog(bot))
