@@ -1,6 +1,6 @@
 """
-SupportCog V16 - Ultimate High-End Ticket System für RedBot
-Fixes: ManageCats Interaction Fix (Bearbeiten-Button geht wieder), UX Verbesserung (Dropdowns zeigen aktuelle Werte an).
+SupportCog V17 - Ultimate High-End Ticket System für RedBot
+Fixes: Entfernung des globalen Ticket-Typ Schalters. System entscheidet nun pro Kategorie (Channel ODER Thread).
 """
 
 import discord
@@ -149,7 +149,7 @@ class BaseSetupView(discord.ui.View):
     def __init__(self, cog: "SupportCog", ctx: commands.Context):
         super().__init__(timeout=300); self.cog = cog; self.ctx = ctx
         self.log_channel_id = None; self.dm_notifications = True; self.autoclose_hours = 48; self.cooldown_minutes = 0
-        self.ticket_type = "Channels"; self.max_tickets_per_user = 1
+        self.max_tickets_per_user = 1
         self.update_ui()
 
     def update_ui(self):
@@ -163,11 +163,6 @@ class BaseSetupView(discord.ui.View):
         async def log_cb(inter: discord.Interaction):
             self.log_channel_id = log_sel.values[0].id; self.update_ui(); await inter.response.edit_message(view=self)
         log_sel.callback = log_cb; self.add_item(log_sel)
-
-        btn_type = discord.ui.Button(label=f"Ticket Typ: {self.ticket_type}", style=discord.ButtonStyle.primary, emoji='🔀')
-        async def type_cb(inter: discord.Interaction):
-            self.ticket_type = "Private Threads" if self.ticket_type == "Channels" else "Channels"; self.update_ui(); await inter.response.edit_message(view=self)
-        btn_type.callback = type_cb; self.add_item(btn_type)
 
         btn_dm = discord.ui.Button(label=f"DMs: {'AN' if self.dm_notifications else 'AUS'}", style=discord.ButtonStyle.success if self.dm_notifications else discord.ButtonStyle.danger, emoji='✉️')
         async def dm_cb(inter: discord.Interaction):
@@ -233,7 +228,6 @@ class CategorySetupView(discord.ui.View):
         async def emoji_cb(inter: discord.Interaction): await inter.response.send_modal(CategoryTextModal(self, "emoji", "Emoji", "Standard Emoji", max_len=10, required=False))
         btn_emoji.callback = emoji_cb; self.add_item(btn_emoji)
 
-        # UX FIX: Dropdowns zeigen aktuell gewählte Werte an
         disc_cat_ph = "Discord Kategorie (für Channel-Typ)"
         if self.discord_category_id:
             ch = self.ctx.guild.get_channel(self.discord_category_id)
@@ -293,7 +287,7 @@ class SupportCog(commands.Cog):
         default_guild = {
             "panels": [], "log_channel_id": None, "dm_notifications": True, "categories": {},
             "active_tickets": [], "autoclose_hours": 48, "cooldown_minutes": 0, "blacklist": [],
-            "stats": {}, "ticket_type": "Channels", "max_tickets_per_user": 1
+            "stats": {}, "max_tickets_per_user": 1
         }
         self.config.register_guild(**default_guild)
         self.autoclose_task = None
@@ -378,13 +372,13 @@ class SupportCog(commands.Cog):
     @ticket_cmd.command(name="setup")
     async def ticket_setup(self, ctx: commands.Context):
         view = BaseSetupView(self, ctx)
-        msg = await ctx.send(embed=discord.Embed(title="🛠️ Ticket Basis-Setup", description="Konfiguriere Log-Channel, Ticket Typ, DMs, Auto-Close, Cooldown & Max Tickets.", color=discord.Color.blurple()), view=view)
+        msg = await ctx.send(embed=discord.Embed(title="🛠️ Ticket Basis-Setup", description="Konfiguriere Log-Channel, DMs, Auto-Close, Cooldown & Max Tickets.", color=discord.Color.blurple()), view=view)
         view.message = msg
 
     @ticket_cmd.command(name="addcat")
     async def ticket_addcat(self, ctx: commands.Context):
         view = CategorySetupView(self, ctx)
-        msg = await ctx.send(embed=discord.Embed(title="🏷️ Kategorie Setup", description="Konfiguriere alle Werte (inkl. Thread-Channel).", color=discord.Color.green()), view=view)
+        msg = await ctx.send(embed=discord.Embed(title="🏷️ Kategorie Setup", description="Konfiguriere alle Werte. Wähle Channel ODER Thread.", color=discord.Color.green()), view=view)
         view.message = msg
 
     @ticket_cmd.command(name="managecats")
@@ -403,12 +397,15 @@ class SupportCog(commands.Cog):
             btn_del = discord.ui.Button(label="Löschen", style=discord.ButtonStyle.danger, emoji="🗑️")
             btn_back = discord.ui.Button(label="Abbrechen", style=discord.ButtonStyle.secondary, emoji="⬅️")
             
-            # HIER WAR DER FIX: Wir nutzen inter2.response.edit_message statt inter2.message.edit
             async def edit_cb(inter2: discord.Interaction):
-                setup_view = CategorySetupView(self, ctx, cat_id=cat_id, cat_data=cat_data)
-                await inter2.response.edit_message(embed=discord.Embed(title="✏️ Kategorie bearbeiten", description="Passe die Werte an und klicke auf 'Update durchführen'.", color=discord.Color.orange()), view=setup_view)
-                setup_view.message = inter2.message
-                
+                try:
+                    setup_view = CategorySetupView(self, ctx, cat_id=cat_id, cat_data=cat_data)
+                    await inter2.response.edit_message(embed=discord.Embed(title="✏️ Kategorie bearbeiten", description="Passe die Werte an und klicke auf 'Update durchführen'.", color=discord.Color.orange()), view=setup_view)
+                    setup_view.message = inter2.message
+                except Exception as e:
+                    if not inter2.response.is_done(): await inter2.response.send_message(f"Error: {e}", ephemeral=True)
+                    else: await inter2.followup.send(f"Error: {e}", ephemeral=True)
+                    
             async def del_cb(inter2: discord.Interaction):
                 del categories[cat_id]; await self.config.guild(ctx.guild).categories.set(categories); await self.update_panels(ctx.guild)
                 await inter2.response.edit_message(content=f"✅ Kategorie '{cat_data['name']}' wurde gelöscht.", embed=None, view=None)
@@ -546,9 +543,8 @@ class SupportCog(commands.Cog):
         await self.config.guild(guild).dm_notifications.set(wizard.dm_notifications)
         await self.config.guild(guild).autoclose_hours.set(wizard.autoclose_hours)
         await self.config.guild(guild).cooldown_minutes.set(wizard.cooldown_minutes)
-        await self.config.guild(guild).ticket_type.set(wizard.ticket_type)
         await self.config.guild(guild).max_tickets_per_user.set(wizard.max_tickets_per_user)
-        await interaction.response.edit_message(content=f"✅ Basis-Setup abgeschlossen!\nTicket-Typ: **{wizard.ticket_type}**.\n\nNutze `[p]ticket postpanel #channel` um das Ticket-Panel zu posten.", embed=None, view=None)
+        await interaction.response.edit_message(content=f"✅ Basis-Setup abgeschlossen!\n\nNutze `[p]ticket postpanel #channel` um das Ticket-Panel zu posten.", embed=None, view=None)
 
     async def save_category(self, interaction: discord.Interaction, wizard: CategorySetupView, cat_id: str = None):
         guild = interaction.guild
@@ -582,11 +578,11 @@ class SupportCog(commands.Cog):
         staff_role = guild.get_role(cat_data["staff_role_id"])
         high_role = guild.get_role(cat_data.get("high_team_role_id"))
         channel_name = f"{cat_data['abbr']}-{user.name}"[:100]
-        ticket_type = config.get("ticket_type", "Channels")
 
-        if ticket_type == "Private Threads":
+        # INTELLIGENTE LOGIK: Entscheidet anhand der Kategorie-Einstellung, ob Thread oder Channel!
+        if cat_data.get("thread_parent_id"):
             parent_ch = guild.get_channel(cat_data.get("thread_parent_id"))
-            if not parent_ch: return await interaction.followup.send("❌ Für diese Kategorie wurde kein Thread-Channel eingerichtet! Admin muss `[p]ticket managecats` nutzen.", ephemeral=True)
+            if not parent_ch: return await interaction.followup.send("❌ Fehler: Der Thread-Channel wurde gelöscht. Admin muss `[p]ticket managecats` nutzen.", ephemeral=True)
             try:
                 ticket_channel = await parent_ch.create_thread(name=channel_name, type=discord.ChannelType.private_thread, reason=f"Ticket von {user}")
                 await ticket_channel.add_user(user)
@@ -594,7 +590,9 @@ class SupportCog(commands.Cog):
                 if high_role: asyncio.create_task(self.add_role_to_thread_silently(ticket_channel, high_role))
             except discord.Forbidden:
                 return await interaction.followup.send("❌ **FEHLER:** Mir fehlen die Rechte, um Private Threads zu erstellen.", ephemeral=True)
-        else:
+            except Exception as e:
+                return await interaction.followup.send(f"❌ Fehler beim Erstellen des Threads: `{e}`", ephemeral=True)
+        elif cat_data.get("discord_category_id"):
             category = guild.get_channel(cat_data.get("discord_category_id"))
             if not category: return await interaction.followup.send("❌ Fehler: Die zugewiesene Discord-Kategorie wurde gelöscht.", ephemeral=True)
             overwrites = {
@@ -605,6 +603,8 @@ class SupportCog(commands.Cog):
             if staff_role: overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
             try: ticket_channel = await guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites, topic=f"Ticket von {user} (ID: {user.id}) | Kat: {cat_data['name']}", reason=f"Ticket erstellt von {user}")
             except discord.Forbidden: return await interaction.followup.send("❌ **FEHLER:** Mir fehlen die Rechte, um Kanäle zu verwalten.", ephemeral=True)
+        else:
+            return await interaction.followup.send("❌ Diese Kategorie hat weder einen Thread-Channel noch eine Discord-Kategorie. Admin muss `[p]ticket managecats` nutzen.", ephemeral=True)
 
         now_iso = datetime.datetime.now().isoformat()
         tickets = config["active_tickets"]
@@ -617,7 +617,6 @@ class SupportCog(commands.Cog):
         view = TicketControlView(self)
         await ticket_channel.send(content=f"{user.mention} {mention_staff}", embed=embed, view=view)
         
-        # DM & LOG on Open
         if config["dm_notifications"]:
             await self.send_dm(user, "🎫 Ticket erstellt", f"Dein Ticket auf **{guild.name}** wurde erfolgreich eröffnet.\n**Kategorie:** {cat_data['name']}\nEin Teammitglied wird sich bald um dein Anliegen kümmern.")
         await self.send_log(guild, "✅ Ticket eröffnet", discord.Color.green(), [("Ersteller", f"{user.mention} (`{user.id}`)"), ("Kategorie", cat_data['name']), ("Channel", ticket_channel.mention)])
@@ -694,7 +693,6 @@ class SupportCog(commands.Cog):
         await self.config.guild(guild).active_tickets.set(tickets)
         await interaction.response.send_message("✅ Status geändert.", ephemeral=True)
         
-        # DM & LOG on Status Change
         config = await self.config.guild(guild).all()
         if config["dm_notifications"] and user:
             await self.send_dm(user, "🔄 Ticket Status aktualisiert", f"Der Status deines Tickets auf **{guild.name}** wurde aktualisiert zu:\n**{status_names.get(new_status)}**")
@@ -730,7 +728,6 @@ class SupportCog(commands.Cog):
         ticket_data["escalated"] = True; ticket_data["claimed_by"] = None
         await channel.send(f"⚠️ **Ticket eskaliert!** {interaction.user.mention} hat das High-Team ({high_role.mention}) hinzugezogen.")
         
-        # DM & LOG on Escalate
         user_obj = guild.get_member(ticket_data["user_id"])
         if config["dm_notifications"] and user_obj:
             await self.send_dm(user_obj, "⚠️ Ticket eskaliert", f"Dein Ticket auf **{guild.name}** wurde an das High-Team eskaliert.\nDas High-Team kümmert sich nun um dein Anliegen.")
