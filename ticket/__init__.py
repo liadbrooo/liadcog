@@ -1,6 +1,6 @@
 """
-SupportCog V11 - Ultimate High-End Ticket System für RedBot
-Fixes: High-Team wird bei Threads im Hintergrund hinzugefügt (ohne Ping). UI Update Fix.
+SupportCog V12 - Ultimate High-End Ticket System für RedBot
+Neu: Kategorie Verwaltung (Bearbeiten & Löschen).
 """
 
 import discord
@@ -155,24 +155,18 @@ class BaseSetupView(discord.ui.View):
         self.clear_items()
         log_sel = discord.ui.ChannelSelect(placeholder="Log-Channel", channel_types=[discord.ChannelType.text], custom_id="base_log")
         async def log_cb(inter: discord.Interaction):
-            self.log_channel_id = log_sel.values[0].id
-            await inter.response.send_message("Log-Channel aktualisiert.", ephemeral=True)
-            self.update_ui()
-            await self.message.edit(view=self)
+            self.log_channel_id = log_sel.values[0].id; await inter.response.send_message("Log-Channel aktualisiert.", ephemeral=True); self.update_ui(); await self.message.edit(view=self)
         log_sel.callback = log_cb; self.add_item(log_sel)
 
         btn_type = discord.ui.Button(label=f"Ticket Typ: {self.ticket_type}", style=discord.ButtonStyle.primary, emoji='🔀')
         async def type_cb(inter: discord.Interaction):
             self.ticket_type = "Private Threads" if self.ticket_type == "Channels" else "Channels"
-            self.update_ui() # HIER WAR DER FEHLER
-            await inter.response.edit_message(view=self)
+            self.update_ui(); await inter.response.edit_message(view=self)
         btn_type.callback = type_cb; self.add_item(btn_type)
 
         btn_dm = discord.ui.Button(label=f"DMs: {'AN' if self.dm_notifications else 'AUS'}", style=discord.ButtonStyle.success if self.dm_notifications else discord.ButtonStyle.danger, emoji='✉️')
         async def dm_cb(inter: discord.Interaction):
-            self.dm_notifications = not self.dm_notifications
-            self.update_ui() # HIER AUCH
-            await inter.response.edit_message(view=self)
+            self.dm_notifications = not self.dm_notifications; self.update_ui(); await inter.response.edit_message(view=self)
         btn_dm.callback = dm_cb; self.add_item(btn_dm)
 
         btn_auto = discord.ui.Button(label=f"Auto-Close: {self.autoclose_hours}h", style=discord.ButtonStyle.secondary, emoji='⏳')
@@ -200,9 +194,15 @@ class SimpleNumberModal(discord.ui.Modal):
         except ValueError: await interaction.response.send_message("❌ Bitte gib eine gültige Zahl ein.", ephemeral=True)
 
 class CategorySetupView(discord.ui.View):
-    def __init__(self, cog: "SupportCog", ctx: commands.Context):
-        super().__init__(timeout=300); self.cog = cog; self.ctx = ctx
-        self.name=None; self.description=None; self.emoji="🎫"; self.abbr="TICKET"; self.discord_category_id=None; self.staff_role_id=None; self.high_team_role_id=None
+    def __init__(self, cog: "SupportCog", ctx: commands.Context, cat_id: str = None, cat_data: dict = None):
+        super().__init__(timeout=300); self.cog = cog; self.ctx = ctx; self.cat_id = cat_id
+        self.name = cat_data.get("name") if cat_data else None
+        self.description = cat_data.get("description") if cat_data else None
+        self.emoji = cat_data.get("emoji", "🎫") if cat_data else "🎫"
+        self.abbr = cat_data.get("abbr", "TICKET") if cat_data else "TICKET"
+        self.discord_category_id = cat_data.get("discord_category_id") if cat_data else None
+        self.staff_role_id = cat_data.get("staff_role_id") if cat_data else None
+        self.high_team_role_id = cat_data.get("high_team_role_id") if cat_data else None
         self.update_ui()
 
     def update_ui(self):
@@ -238,10 +238,10 @@ class CategorySetupView(discord.ui.View):
             self.high_team_role_id = high_sel.values[0].id; await inter.response.send_message("High-Team Rolle gesetzt.", ephemeral=True); self.update_ui(); await self.message.edit(view=self)
         high_sel.callback = high_cb; self.add_item(high_sel)
 
-        btn_save = discord.ui.Button(label="Kategorie speichern", style=discord.ButtonStyle.success, emoji='✅')
+        btn_save = discord.ui.Button(label="Kategorie speichern" if not self.cat_id else "Update durchführen", style=discord.ButtonStyle.success, emoji='✅')
         async def save_cb(inter: discord.Interaction):
             if not all([self.name, self.abbr, self.discord_category_id, self.staff_role_id]): return await inter.response.send_message("Bitte fülle alle Pflichtfelder aus!", ephemeral=True)
-            await self.cog.save_category(inter, self); self.stop()
+            await self.cog.save_category(inter, self, self.cat_id); self.stop()
         btn_save.callback = save_cb; self.add_item(btn_save)
 
 class CategoryTextModal(discord.ui.Modal):
@@ -333,6 +333,54 @@ class SupportCog(commands.Cog):
         view = CategorySetupView(self, ctx)
         msg = await ctx.send(embed=discord.Embed(title="🏷️ Kategorie Setup", description="Konfiguriere alle Werte für diese Kategorie.", color=discord.Color.green()), view=view)
         view.message = msg
+
+    @ticket_cmd.command(name="managecats")
+    async def ticket_managecats(self, ctx: commands.Context):
+        """Verwalte (Bearbeiten/Löschen) bestehende Kategorien."""
+        categories = await self.config.guild(ctx.guild).categories()
+        if not categories:
+            return await ctx.send("❌ Es existieren noch keine Kategorien.")
+        
+        options = [discord.SelectOption(label=c["name"][:100], value=cat_id, description="Zum Bearbeiten/Löschen klicken", emoji=c.get("emoji")) for cat_id, c in categories.items()][:25]
+        
+        view = discord.ui.View(timeout=300)
+        select = discord.ui.Select(placeholder="Wähle eine Kategorie aus...", options=options)
+        
+        async def select_cb(inter: discord.Interaction):
+            if inter.user != ctx.author:
+                return await inter.response.send_message("Nur du kannst das.", ephemeral=True)
+            
+            cat_id = select.values[0]
+            cat_data = categories[cat_id]
+            
+            ed_view = discord.ui.View(timeout=300)
+            btn_edit = discord.ui.Button(label="Bearbeiten", style=discord.ButtonStyle.primary, emoji="✏️")
+            btn_del = discord.ui.Button(label="Löschen", style=discord.ButtonStyle.danger, emoji="🗑️")
+            btn_back = discord.ui.Button(label="Abbrechen", style=discord.ButtonStyle.secondary, emoji="⬅️")
+            
+            async def edit_cb(inter2):
+                setup_view = CategorySetupView(self, ctx, cat_id=cat_id, cat_data=cat_data)
+                setup_view.message = await inter2.message.edit(embed=discord.Embed(title="✏️ Kategorie bearbeiten", description="Passe die Werte an und klicke auf 'Update durchführen'.", color=discord.Color.orange()), view=setup_view)
+                
+            async def del_cb(inter2):
+                del categories[cat_id]
+                await self.config.guild(ctx.guild).categories.set(categories)
+                await self.update_panels(ctx.guild)
+                await inter2.message.edit(content=f"✅ Kategorie '{cat_data['name']}' wurde gelöscht.", embed=None, view=None)
+                
+            async def back_cb(inter2):
+                await inter2.message.delete()
+                
+            btn_edit.callback = edit_cb
+            btn_del.callback = del_cb
+            btn_back.callback = back_cb
+            ed_view.add_item(btn_edit); ed_view.add_item(btn_del); ed_view.add_item(btn_back)
+            
+            await inter.response.edit_message(content=f"Ausgewählt: **{cat_data['name']}**. Was möchtest du tun?", embed=None, view=ed_view)
+            
+        select.callback = select_cb
+        view.add_item(select)
+        msg = await ctx.send("Wähle eine Kategorie aus, um sie zu bearbeiten oder zu löschen:", view=view)
 
     @ticket_cmd.command(name="postpanel")
     async def ticket_postpanel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -446,14 +494,23 @@ class SupportCog(commands.Cog):
         await self.config.guild(guild).ticket_type.set(wizard.ticket_type)
         await interaction.response.edit_message(content=f"✅ Basis-Setup abgeschlossen!\nTicket-Typ: **{wizard.ticket_type}**.\n\nNutze `[p]ticket postpanel #channel` um das Ticket-Panel zu posten.", embed=None, view=None)
 
-    async def save_category(self, interaction: discord.Interaction, wizard: CategorySetupView):
+    async def save_category(self, interaction: discord.Interaction, wizard: CategorySetupView, cat_id: str = None):
         guild = interaction.guild
-        cat_id = str(uuid.uuid4())[:8]
+        if not cat_id:
+            cat_id = str(uuid.uuid4())[:8]
+            action = "gespeichert"
+        else:
+            action = "aktualisiert"
+            
         categories = await self.config.guild(guild).categories()
-        categories[cat_id] = {"name": wizard.name, "description": wizard.description, "emoji": wizard.emoji, "abbr": wizard.abbr.upper(), "discord_category_id": wizard.discord_category_id, "staff_role_id": wizard.staff_role_id, "high_team_role_id": wizard.high_team_role_id}
+        categories[cat_id] = {
+            "name": wizard.name, "description": wizard.description, "emoji": wizard.emoji, 
+            "abbr": wizard.abbr.upper(), "discord_category_id": wizard.discord_category_id, 
+            "staff_role_id": wizard.staff_role_id, "high_team_role_id": wizard.high_team_role_id
+        }
         await self.config.guild(guild).categories.set(categories)
         await self.update_panels(guild)
-        await interaction.response.edit_message(content=f"✅ Kategorie '{wizard.name}' gespeichert! Alle Panels wurden aktualisiert.", embed=None, view=None)
+        await interaction.response.edit_message(content=f"✅ Kategorie '{wizard.name}' {action}! Alle Panels wurden aktualisiert.", embed=None, view=None)
 
     async def add_role_to_thread_silently(self, thread: discord.Thread, role: discord.Role):
         """Fügt Mitglieder einer Rolle zu einem Thread hinzu, OHNE sie zu pingen."""
