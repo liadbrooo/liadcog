@@ -1,6 +1,6 @@
 """
 SupportCog V11 - Ultimate High-End Ticket System für RedBot
-Fixes: High-Team wird bei Threads im Hintergrund hinzugefügt (ohne Ping).
+Fixes: High-Team wird bei Threads im Hintergrund hinzugefügt (ohne Ping). UI Update Fix.
 """
 
 import discord
@@ -148,24 +148,31 @@ class BaseSetupView(discord.ui.View):
     def __init__(self, cog: "SupportCog", ctx: commands.Context):
         super().__init__(timeout=300); self.cog = cog; self.ctx = ctx
         self.log_channel_id = None; self.dm_notifications = True; self.autoclose_hours = 48; self.cooldown_minutes = 0
-        self.ticket_type = "Channels" # "Channels" or "Private Threads"
+        self.ticket_type = "Channels"
         self.update_ui()
 
     def update_ui(self):
         self.clear_items()
         log_sel = discord.ui.ChannelSelect(placeholder="Log-Channel", channel_types=[discord.ChannelType.text], custom_id="base_log")
         async def log_cb(inter: discord.Interaction):
-            self.log_channel_id = log_sel.values[0].id; await inter.response.send_message("Log-Channel aktualisiert.", ephemeral=True); self.update_ui(); await self.message.edit(view=self)
+            self.log_channel_id = log_sel.values[0].id
+            await inter.response.send_message("Log-Channel aktualisiert.", ephemeral=True)
+            self.update_ui()
+            await self.message.edit(view=self)
         log_sel.callback = log_cb; self.add_item(log_sel)
 
         btn_type = discord.ui.Button(label=f"Ticket Typ: {self.ticket_type}", style=discord.ButtonStyle.primary, emoji='🔀')
         async def type_cb(inter: discord.Interaction):
             self.ticket_type = "Private Threads" if self.ticket_type == "Channels" else "Channels"
+            self.update_ui() # HIER WAR DER FEHLER
             await inter.response.edit_message(view=self)
         btn_type.callback = type_cb; self.add_item(btn_type)
 
         btn_dm = discord.ui.Button(label=f"DMs: {'AN' if self.dm_notifications else 'AUS'}", style=discord.ButtonStyle.success if self.dm_notifications else discord.ButtonStyle.danger, emoji='✉️')
-        async def dm_cb(inter: discord.Interaction): self.dm_notifications = not self.dm_notifications; await inter.response.edit_message(view=self)
+        async def dm_cb(inter: discord.Interaction):
+            self.dm_notifications = not self.dm_notifications
+            self.update_ui() # HIER AUCH
+            await inter.response.edit_message(view=self)
         btn_dm.callback = dm_cb; self.add_item(btn_dm)
 
         btn_auto = discord.ui.Button(label=f"Auto-Close: {self.autoclose_hours}h", style=discord.ButtonStyle.secondary, emoji='⏳')
@@ -475,9 +482,7 @@ class SupportCog(commands.Cog):
                 ticket_channel = await interaction.channel.create_thread(name=channel_name, type=discord.ChannelType.private_thread, reason=f"Ticket von {user}")
                 await ticket_channel.add_user(user)
                 
-                # Support Team SILENT hinzufügen
                 if staff_role: asyncio.create_task(self.add_role_to_thread_silently(ticket_channel, staff_role))
-                # High Team SILENT hinzufügen (ohne Ping, können aber mitlesen)
                 if high_role: asyncio.create_task(self.add_role_to_thread_silently(ticket_channel, high_role))
             except discord.Forbidden:
                 return await interaction.followup.send("❌ **FEHLER:** Mir fehlen die Rechte, um Private Threads zu erstellen.", ephemeral=True)
@@ -510,8 +515,6 @@ class SupportCog(commands.Cog):
             color=discord.Color.green(), timestamp=datetime.datetime.now()
         )
         embed.set_footer(text=f"Ticket-ID: {ticket_channel.id} | Kategorie: {cat_data['name']}")
-        
-        # Nur das Support Team pingen, nicht das High Team!
         mention_staff = staff_role.mention if staff_role else ""
         view = TicketControlView(self)
         await ticket_channel.send(content=f"{user.mention} {mention_staff}", embed=embed, view=view)
@@ -601,8 +604,6 @@ class SupportCog(commands.Cog):
         
         is_thread = isinstance(channel, discord.Thread)
         if is_thread:
-            # Für Threads: High Team pingen (da sie schon drin sind aber nicht mitbekommen haben, dass eskaliert wurde)
-            # Normales Team rauswerfen
             if staff_role:
                 for m in staff_role.members:
                     try: await channel.remove_user(m)
@@ -620,7 +621,6 @@ class SupportCog(commands.Cog):
         await interaction.message.edit(view=view)
         ticket_data["escalated"] = True; ticket_data["claimed_by"] = None
         
-        # Hier pingen wir das High Team explizit, da eskaliert wurde
         await channel.send(f"⚠️ **Ticket eskaliert!** {interaction.user.mention} hat das High-Team ({high_role.mention}) hinzugezogen. Der Zugriff für das normale Team wurde entzogen.")
         for i, t in enumerate(config["active_tickets"]):
             if t["channel_id"] == channel.id: config["active_tickets"][i] = ticket_data; break
