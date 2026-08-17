@@ -1,7 +1,8 @@
 """
-SupportCog V25 - Final Stable Version
-- Alle Fehler behoben, inkl. View-Registrierung und Auto-Eskalation
-- Alle gewünschten Features integriert
+SupportCog V26 - Final Stable & Robust
+- Asynchrone Initialisierung verhindert Ladefehler
+- Alle vorherigen Fehler behoben
+- Kompatibel mit RedBot und discord.py 2.x
 """
 
 import discord
@@ -654,77 +655,94 @@ class SupportCog(commands.Cog):
         self._active_channel_cache = {}
 
         self.autoclose_task = None
+        self.init_task = None
 
     async def cog_load(self):
-        await self.bot.wait_until_ready()
+        # Asynchrone Initialisierung starten, um Blockaden zu vermeiden
+        self.init_task = self.bot.loop.create_task(self._async_init())
 
-        # Cache aufbauen und persistente Views registrieren
+    async def _async_init(self):
+        try:
+            await self.bot.wait_until_ready()
+            await self._initialize_views_and_cache()
+            self.autoclose_task = self.bot.loop.create_task(self.autoclose_loop())
+        except Exception as e:
+            log.error(f"SupportCog Initialisierung fehlgeschlagen: {e}")
+
+    async def _initialize_views_and_cache(self):
         all_guilds = await self.config.all_guilds()
         for guild_id, data in all_guilds.items():
             guild = self.bot.get_guild(guild_id)
             if not guild:
                 continue
 
+            # Cache aufbauen
             self._active_channel_cache[guild_id] = {
                 t["channel_id"] for t in data.get("active_tickets", [])
             }
 
-            # Panels registrieren und Optionen setzen
+            # Panels registrieren
             categories = data.get("categories", {})
             active_tickets = data.get("active_tickets", [])
             for panel in data.get("panels", []):
-                view = TicketPanelView(self)
-                if categories:
-                    options = []
-                    for cat_id, c in categories.items():
-                        active_count = sum(
-                            1 for t in active_tickets
-                            if t["cat_id"] == cat_id and t.get("status") == "ACTIVE"
-                        )
-                        max_t = c.get("max_tickets", 10)
-                        label = c["name"][:100]
-                        if max_t > 0:
-                            label = f"{c['name']} ({active_count}/{max_t})"[:100]
-                            description = f"{c.get('description', '')} - {int((active_count/max_t)*100)}% ausgelastet"[:100] if c.get('description') else f"{int((active_count/max_t)*100)}% ausgelastet"
-                        else:
-                            description = c.get("description", "")[:100] if c.get("description") else None
-
-                        options.append(
-                            discord.SelectOption(
-                                label=label,
-                                value=cat_id,
-                                description=description,
-                                emoji=c.get("emoji")
+                try:
+                    view = TicketPanelView(self)
+                    if categories:
+                        options = []
+                        for cat_id, c in categories.items():
+                            active_count = sum(
+                                1 for t in active_tickets
+                                if t["cat_id"] == cat_id and t.get("status") == "ACTIVE"
                             )
-                        )
-                    options = options[:25]
-                    for child in view.children:
-                        if isinstance(child, discord.ui.StringSelect):
-                            child.options = options
-                else:
-                    view.clear_items()
-                self.bot.add_view(view, message_id=panel["msg_id"])
+                            max_t = c.get("max_tickets", 10)
+                            label = c["name"][:100]
+                            if max_t > 0:
+                                label = f"{c['name']} ({active_count}/{max_t})"[:100]
+                                description = f"{c.get('description', '')} - {int((active_count/max_t)*100)}% ausgelastet"[:100] if c.get('description') else f"{int((active_count/max_t)*100)}% ausgelastet"
+                            else:
+                                description = c.get("description", "")[:100] if c.get("description") else None
 
-            # Ticket-Control-Views registrieren und Button-Label anpassen
+                            options.append(
+                                discord.SelectOption(
+                                    label=label,
+                                    value=cat_id,
+                                    description=description,
+                                    emoji=c.get("emoji")
+                                )
+                            )
+                        options = options[:25]
+                        for child in view.children:
+                            if isinstance(child, discord.ui.StringSelect):
+                                child.options = options
+                    else:
+                        view.clear_items()
+                    self.bot.add_view(view, message_id=panel["msg_id"])
+                except Exception as e:
+                    log.error(f"Panel-Registrierung fehlgeschlagen für {panel}: {e}")
+
+            # Ticket-Control-Views registrieren
             for ticket in data.get("active_tickets", []):
                 if "panel_msg_id" in ticket and ticket["panel_msg_id"]:
-                    view = TicketControlView(self)
-                    if ticket.get("claimed_by"):
-                        for child in view.children:
-                            if child.custom_id == "support_ticket_claim_btn":
-                                child.label = "Freigeben"
-                                child.style = discord.ButtonStyle.secondary
-                    if ticket.get("escalated"):
-                        for child in view.children:
-                            if child.custom_id == "support_ticket_escalate_btn":
-                                child.disabled = True
-                    self.bot.add_view(view, message_id=ticket["panel_msg_id"])
-
-        self.autoclose_task = self.bot.loop.create_task(self.autoclose_loop())
+                    try:
+                        view = TicketControlView(self)
+                        if ticket.get("claimed_by"):
+                            for child in view.children:
+                                if child.custom_id == "support_ticket_claim_btn":
+                                    child.label = "Freigeben"
+                                    child.style = discord.ButtonStyle.secondary
+                        if ticket.get("escalated"):
+                            for child in view.children:
+                                if child.custom_id == "support_ticket_escalate_btn":
+                                    child.disabled = True
+                        self.bot.add_view(view, message_id=ticket["panel_msg_id"])
+                    except Exception as e:
+                        log.error(f"Ticket-Control-View Registrierung fehlgeschlagen: {e}")
 
     def cog_unload(self):
         if self.autoclose_task:
             self.autoclose_task.cancel()
+        if self.init_task and not self.init_task.done():
+            self.init_task.cancel()
 
     # --- Cache-Helfer ---
     def _add_to_active_cache(self, guild_id: int, channel_id: int):
