@@ -1,8 +1,8 @@
 """
-SupportCog V27 - Final Stable & Compatible
-- Verwendet discord.ui.Select statt StringSelect für maximale Kompatibilität
-- Asynchrone Initialisierung verhindert Ladefehler
-- Alle vorherigen Fehler behoben
+SupportCog V28 - Final Stable & Compatible
+- Ersetzt ChannelSelect/RoleSelect durch normale Select-Menüs für maximale Kompatibilität
+- Behebt Fehler bei ticket addcat und setup
+- Alle vorherigen Funktionen und Verbesserungen beibehalten
 """
 
 import discord
@@ -310,22 +310,26 @@ class BaseSetupView(discord.ui.View):
         self.use_emoji_charts = True
         self.update_ui()
 
+    def _get_text_channels(self):
+        """Gibt eine Liste von Textkanälen der Gilde zurück (max 25 für Select)."""
+        return [c for c in self.ctx.guild.text_channels][:25]
+
     def update_ui(self):
         self.clear_items()
 
-        # Row 0: Log-Channel Auswahl
-        log_ph = "Log-Channel wählen"
-        if self.log_channel_id:
-            ch = self.ctx.guild.get_channel(self.log_channel_id)
-            if ch:
-                log_ph = f"Log-Channel: {ch.name}"
-        log_sel = discord.ui.ChannelSelect(
-            placeholder=log_ph,
-            channel_types=[discord.ChannelType.text],
+        # Log-Channel Auswahl über Select
+        log_sel_options = []
+        for ch in self._get_text_channels():
+            label = f"#{ch.name}"[:100]
+            log_sel_options.append(discord.SelectOption(label=label, value=str(ch.id), description="Log-Channel"))
+        log_sel = discord.ui.Select(
+            placeholder="Log-Channel wählen",
+            options=log_sel_options if log_sel_options else [discord.SelectOption(label="Keine Textkanäle", value="none")],
             row=0
         )
         async def log_cb(inter: discord.Interaction):
-            self.log_channel_id = log_sel.values[0].id
+            if log_sel.values[0] != "none":
+                self.log_channel_id = int(log_sel.values[0])
             self.update_ui()
             await inter.response.edit_message(view=self)
         log_sel.callback = log_cb
@@ -473,6 +477,15 @@ class CategorySetupView(discord.ui.View):
         self.max_tickets = cat_data.get("max_tickets", 10) if cat_data else 10
         self.update_ui()
 
+    def _get_categories(self):
+        return [c for c in self.ctx.guild.categories][:25]
+
+    def _get_text_channels(self):
+        return [c for c in self.ctx.guild.text_channels][:25]
+
+    def _get_roles(self):
+        return [r for r in self.ctx.guild.roles if not r.managed][:25]
+
     def update_ui(self):
         self.clear_items()
 
@@ -560,67 +573,77 @@ class CategorySetupView(discord.ui.View):
         btn_save.callback = save_cb
         self.add_item(btn_save)
 
-        disc_cat_ph = "Discord Kategorie (für Channel-Typ)"
-        if self.discord_category_id:
-            ch = self.ctx.guild.get_channel(self.discord_category_id)
-            if ch:
-                disc_cat_ph = f"Kategorie: {ch.name}"
-        disc_cat_sel = discord.ui.ChannelSelect(
-            placeholder=disc_cat_ph,
-            channel_types=[discord.ChannelType.category],
+        # Discord Kategorie Auswahl
+        cat_options = []
+        for cat in self._get_categories():
+            cat_options.append(discord.SelectOption(label=f"Kategorie: {cat.name}"[:100], value=str(cat.id), description="Discord Kategorie"))
+        if not cat_options:
+            cat_options = [discord.SelectOption(label="Keine Kategorien", value="none")]
+        disc_cat_sel = discord.ui.Select(
+            placeholder="Discord Kategorie (für Channel-Typ)",
+            options=cat_options,
             row=2
         )
         async def disc_cat_cb(inter: discord.Interaction):
-            self.discord_category_id = disc_cat_sel.values[0].id
+            if disc_cat_sel.values[0] != "none":
+                self.discord_category_id = int(disc_cat_sel.values[0])
             self.update_ui()
             await inter.response.edit_message(view=self)
         disc_cat_sel.callback = disc_cat_cb
         self.add_item(disc_cat_sel)
 
-        thread_par_ph = "Thread-Channel (für Thread-Typ)"
-        if self.thread_parent_id:
-            ch = self.ctx.guild.get_channel(self.thread_parent_id)
-            if ch:
-                thread_par_ph = f"Thread-Channel: {ch.name}"
-        thread_par_sel = discord.ui.ChannelSelect(
-            placeholder=thread_par_ph,
-            channel_types=[discord.ChannelType.text],
+        # Thread-Channel Auswahl
+        thread_options = []
+        for ch in self._get_text_channels():
+            thread_options.append(discord.SelectOption(label=f"#{ch.name}"[:100], value=str(ch.id), description="Thread-Channel"))
+        if not thread_options:
+            thread_options = [discord.SelectOption(label="Keine Textkanäle", value="none")]
+        thread_par_sel = discord.ui.Select(
+            placeholder="Thread-Channel (für Thread-Typ)",
+            options=thread_options,
             row=3
         )
         async def thread_par_cb(inter: discord.Interaction):
-            self.thread_parent_id = thread_par_sel.values[0].id
+            if thread_par_sel.values[0] != "none":
+                self.thread_parent_id = int(thread_par_sel.values[0])
             self.update_ui()
             await inter.response.edit_message(view=self)
         thread_par_sel.callback = thread_par_cb
         self.add_item(thread_par_sel)
 
-        staff_ph = "Support-Rolle wählen"
-        if self.staff_role_id:
-            r = self.ctx.guild.get_role(self.staff_role_id)
-            if r:
-                staff_ph = f"Support: {r.name}"
-        staff_sel = discord.ui.RoleSelect(
-            placeholder=staff_ph,
+        # Support-Rolle Auswahl
+        staff_options = []
+        for role in self._get_roles():
+            staff_options.append(discord.SelectOption(label=role.name[:100], value=str(role.id), description="Support-Rolle"))
+        if not staff_options:
+            staff_options = [discord.SelectOption(label="Keine Rollen", value="none")]
+        staff_sel = discord.ui.Select(
+            placeholder="Support-Rolle wählen",
+            options=staff_options,
             row=4
         )
         async def staff_cb(inter: discord.Interaction):
-            self.staff_role_id = staff_sel.values[0].id
+            if staff_sel.values[0] != "none":
+                self.staff_role_id = int(staff_sel.values[0])
             self.update_ui()
             await inter.response.edit_message(view=self)
         staff_sel.callback = staff_cb
         self.add_item(staff_sel)
 
-        high_ph = "High-Team Rolle (Eskalation)"
-        if self.high_team_role_id:
-            r = self.ctx.guild.get_role(self.high_team_role_id)
-            if r:
-                high_ph = f"High-Team: {r.name}"
-        high_sel = discord.ui.RoleSelect(
-            placeholder=high_ph,
+        # High-Team Rolle Auswahl
+        high_options = []
+        for role in self._get_roles():
+            high_options.append(discord.SelectOption(label=role.name[:100], value=str(role.id), description="High-Team Rolle"))
+        if not high_options:
+            high_options = [discord.SelectOption(label="Keine Rollen", value="none")]
+        high_sel = discord.ui.Select(
+            placeholder="High-Team Rolle (Eskalation)",
+            options=high_options,
             row=4
         )
         async def high_cb(inter: discord.Interaction):
-            self.high_team_role_id = high_sel.values[0].id
+            if high_sel.values[0] != "none":
+                self.high_team_role_id = int(high_sel.values[0])
             self.update_ui()
             await inter.response.edit_message(view=self)
         high_sel.callback = high_cb
@@ -656,7 +679,6 @@ class SupportCog(commands.Cog):
         self.init_task = None
 
     async def cog_load(self):
-        # Starte Initialisierung im Hintergrund, um den Ladevorgang nicht zu blockieren
         self.init_task = self.bot.loop.create_task(self._async_init())
 
     async def _async_init(self):
@@ -792,7 +814,6 @@ class SupportCog(commands.Cog):
         if not message.guild or message.author.bot:
             return
 
-        # Performance: Nur prüfen, wenn Kanal als aktiver Ticketkanal im Cache ist
         if message.channel.id not in self._active_channel_cache.get(message.guild.id, set()):
             return
 
@@ -841,7 +862,6 @@ class SupportCog(commands.Cog):
                             changed = True
                             continue
 
-                        # Auto-Close nur bei ACTIVE oder WAITING_USER
                         if t.get("status") in ["WAITING_TEAM", "PAUSED"]:
                             if t.get("status") == "WAITING_TEAM" and auto_esc_hours > 0 and not t.get("escalated"):
                                 lm = datetime.datetime.fromisoformat(t.get("last_message", datetime.datetime.now().isoformat()))
@@ -855,7 +875,6 @@ class SupportCog(commands.Cog):
                             changed = True
                             continue
 
-                        # Auto-Close Logik
                         if ah == 0:
                             continue
 
