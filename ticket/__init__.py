@@ -222,24 +222,50 @@ class SimpleNumberModal(discord.ui.Modal):
         self.wizard._update_labels()
         await interaction.response.edit_message(view=self.wizard)
 
-class CategoryTextModal(discord.ui.Modal):
-    def __init__(self, wizard: 'CategorySetupView', attr_name: str, title: str, placeholder: str, max_len: int, required: bool = True):
-        super().__init__(title=title)
+class CategoryAllTextModal(discord.ui.Modal, title="Kategorie Texte"):
+    def __init__(self, wizard: 'CategorySetupView'):
+        super().__init__()
         self.wizard = wizard
-        self.attr_name = attr_name
-        self.text_input = discord.ui.TextInput(
-            label=title,
-            placeholder=placeholder,
-            required=required,
-            max_length=max_len
+
+        self.name_input = discord.ui.TextInput(
+            label="Name der Kategorie",
+            placeholder="z.B. Allgemeiner Support",
+            default=wizard.name if wizard.name else "",
+            max_length=50,
+            required=True
         )
-        self.add_item(self.text_input)
+        self.desc_input = discord.ui.TextInput(
+            label="Beschreibung",
+            placeholder="Wofür ist diese Kategorie?",
+            default=wizard.description if wizard.description else "",
+            max_length=100,
+            required=False
+        )
+        self.abbr_input = discord.ui.TextInput(
+            label="Kanal-Abkürzung",
+            placeholder="z.B. SUP",
+            default=wizard.abbr if wizard.abbr else "",
+            max_length=10,
+            required=True
+        )
+        self.emoji_input = discord.ui.TextInput(
+            label="Emoji",
+            placeholder="z.B. 🎫",
+            default=wizard.emoji if wizard.emoji else "🎫",
+            max_length=10,
+            required=False
+        )
+
+        self.add_item(self.name_input)
+        self.add_item(self.desc_input)
+        self.add_item(self.abbr_input)
+        self.add_item(self.emoji_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        value = self.text_input.value if self.text_input.value else None
-        setattr(self.wizard, self.attr_name, value)
-        if self.attr_name == "emoji" and not value:
-            self.wizard.emoji = "🎫"
+        self.wizard.name = self.name_input.value
+        self.wizard.description = self.desc_input.value or None
+        self.wizard.abbr = self.abbr_input.value
+        self.wizard.emoji = self.emoji_input.value or "🎫"
         self.wizard._update_labels()
         await interaction.response.edit_message(view=self.wizard)
 
@@ -262,74 +288,52 @@ class CategorySetupView(discord.ui.View):
         self._build_ui()
 
     def _build_ui(self):
-        self.btn_name = discord.ui.Button(label="Name" if not self.name else f"Name: {self.name}", style=discord.ButtonStyle.primary, row=0)
-        self.btn_name.callback = self._name_cb
-        self.add_item(self.btn_name)
+        # Row 0: Alle Buttons
+        self.btn_texts = discord.ui.Button(label="Texte anpassen", style=discord.ButtonStyle.primary, row=0, emoji="📝")
+        self.btn_texts.callback = self._texts_cb
+        self.add_item(self.btn_texts)
 
-        self.btn_desc = discord.ui.Button(label="Beschreibung" if not self.description else "Beschreibung ✓", style=discord.ButtonStyle.secondary, row=0)
-        self.btn_desc.callback = self._desc_cb
-        self.add_item(self.btn_desc)
-
-        self.btn_abbr = discord.ui.Button(label="Abkürzung" if not self.abbr else f"Abbr: {self.abbr}", style=discord.ButtonStyle.secondary, row=0)
-        self.btn_abbr.callback = self._abbr_cb
-        self.add_item(self.btn_abbr)
-
-        self.btn_emoji = discord.ui.Button(label=f"Emoji: {self.emoji}", style=discord.ButtonStyle.secondary, row=0)
-        self.btn_emoji.callback = self._emoji_cb
-        self.add_item(self.btn_emoji)
-
-        self.btn_max_tickets = discord.ui.Button(label=f"Max aktiv: {self.max_tickets}", style=discord.ButtonStyle.secondary, emoji='📊', row=1)
+        self.btn_max_tickets = discord.ui.Button(label=f"Max aktiv: {self.max_tickets}", style=discord.ButtonStyle.secondary, emoji='📊', row=0)
         self.btn_max_tickets.callback = self._max_tickets_cb
         self.add_item(self.btn_max_tickets)
 
+        self.btn_save = discord.ui.Button(label="Speichern", style=discord.ButtonStyle.success, emoji='✅', row=0)
+        self.btn_save.callback = self._save_cb
+        self.add_item(self.btn_save)
+
+        # Row 1-4: Jedes Dropdown bekommt seine eigene Reihe
         cat_options = [discord.SelectOption(label=cat.name[:100], value=str(cat.id)) for cat in self.ctx.guild.categories[:25]]
         if not cat_options:
             cat_options = [discord.SelectOption(label="Keine Kategorien", value="none")]
-        self.disc_cat_sel = discord.ui.Select(placeholder="Discord Kategorie (für Channel-Typ)", options=cat_options, row=2)
+        self.disc_cat_sel = discord.ui.Select(placeholder="Discord Kategorie", options=cat_options, row=1)
         self.disc_cat_sel.callback = self._disc_cat_cb
         self.add_item(self.disc_cat_sel)
 
         thread_options = [discord.SelectOption(label=f"#{c.name}"[:100], value=str(c.id)) for c in self.ctx.guild.text_channels[:25]]
         if not thread_options:
             thread_options = [discord.SelectOption(label="Keine Textkanäle", value="none")]
-        self.thread_sel = discord.ui.Select(placeholder="Thread-Channel (für Thread-Typ)", options=thread_options, row=3)
+        self.thread_sel = discord.ui.Select(placeholder="Thread-Channel", options=thread_options, row=2)
         self.thread_sel.callback = self._thread_cb
         self.add_item(self.thread_sel)
 
         staff_options = [discord.SelectOption(label=role.name[:100], value=str(role.id)) for role in self.ctx.guild.roles if not role.managed][:25]
         if not staff_options:
             staff_options = [discord.SelectOption(label="Keine Rollen", value="none")]
-        self.staff_sel = discord.ui.Select(placeholder="Support-Rolle wählen", options=staff_options, row=4)
+        self.staff_sel = discord.ui.Select(placeholder="Support-Rolle wählen", options=staff_options, row=3)
         self.staff_sel.callback = self._staff_cb
         self.add_item(self.staff_sel)
 
         high_options = staff_options.copy()
-        self.high_sel = discord.ui.Select(placeholder="High-Team Rolle (Eskalation)", options=high_options, row=4)
+        self.high_sel = discord.ui.Select(placeholder="High-Team Rolle", options=high_options, row=4)
         self.high_sel.callback = self._high_cb
         self.add_item(self.high_sel)
 
-        self.btn_save = discord.ui.Button(label="Save" if not self.cat_id else "Update", style=discord.ButtonStyle.success, emoji='✅', row=1)
-        self.btn_save.callback = self._save_cb
-        self.add_item(self.btn_save)
-
     def _update_labels(self):
-        self.btn_name.label = f"Name: {self.name}" if self.name else "Name"
-        self.btn_desc.label = "Beschreibung ✓" if self.description else "Beschreibung"
-        self.btn_abbr.label = f"Abbr: {self.abbr}" if self.abbr else "Abkürzung"
-        self.btn_emoji.label = f"Emoji: {self.emoji}"
+        self.btn_texts.label = f"Name: {self.name}" if self.name else "Texte anpassen"
         self.btn_max_tickets.label = f"Max aktiv: {self.max_tickets}"
 
-    async def _name_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(CategoryTextModal(self, "name", "Name der Kategorie", "z.B. Allgemeiner Support", max_len=50))
-
-    async def _desc_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(CategoryTextModal(self, "description", "Beschreibung", "Wofür ist diese Kategorie?", max_len=100, required=False))
-
-    async def _abbr_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(CategoryTextModal(self, "abbr", "Channel-Abkürzung", "z.B. SUP", max_len=10))
-
-    async def _emoji_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(CategoryTextModal(self, "emoji", "Emoji", "Standard Emoji", max_len=10, required=False))
+    async def _texts_cb(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(CategoryAllTextModal(self))
 
     async def _max_tickets_cb(self, interaction: discord.Interaction):
         await interaction.response.send_modal(SimpleNumberModal(self, "max_tickets", "Maximale aktive Tickets (0 = unbegrenzt)", 0, 100))
@@ -341,7 +345,7 @@ class CategorySetupView(discord.ui.View):
             self.disc_cat_sel.placeholder = f"Kategorie: {cat.name}" if cat else "Discord Kategorie"
         else:
             self.discord_category_id = None
-            self.disc_cat_sel.placeholder = "Discord Kategorie (für Channel-Typ)"
+            self.disc_cat_sel.placeholder = "Discord Kategorie"
         await interaction.response.edit_message(view=self)
 
     async def _thread_cb(self, interaction: discord.Interaction):
@@ -351,14 +355,14 @@ class CategorySetupView(discord.ui.View):
             self.thread_sel.placeholder = f"Thread: #{ch.name}" if ch else "Thread-Channel"
         else:
             self.thread_parent_id = None
-            self.thread_sel.placeholder = "Thread-Channel (für Thread-Typ)"
+            self.thread_sel.placeholder = "Thread-Channel"
         await interaction.response.edit_message(view=self)
 
     async def _staff_cb(self, interaction: discord.Interaction):
         if self.staff_sel.values[0] != "none":
             self.staff_role_id = int(self.staff_sel.values[0])
             role = self.ctx.guild.get_role(self.staff_role_id)
-            self.staff_sel.placeholder = f"Support: {role.name}" if role else "Support-Rolle"
+            self.staff_sel.placeholder = f"Support: {role.name}" if role else "Support-Rolle wählen"
         else:
             self.staff_role_id = None
             self.staff_sel.placeholder = "Support-Rolle wählen"
@@ -371,14 +375,14 @@ class CategorySetupView(discord.ui.View):
             self.high_sel.placeholder = f"High-Team: {role.name}" if role else "High-Team Rolle"
         else:
             self.high_team_role_id = None
-            self.high_sel.placeholder = "High-Team Rolle (Eskalation)"
+            self.high_sel.placeholder = "High-Team Rolle"
         await interaction.response.edit_message(view=self)
 
     async def _save_cb(self, interaction: discord.Interaction):
         if not self.name or not self.abbr or not self.staff_role_id:
-            return await interaction.response.send_message("Bitte fülle Name, Abkürzung und Support-Rolle aus!", ephemeral=True)
+            return await interaction.response.send_message("❌ Bitte klicke auf 'Texte anpassen' und wähle eine Support-Rolle aus!", ephemeral=True)
         if not self.discord_category_id and not self.thread_parent_id:
-            return await interaction.response.send_message("Bitte wähle entweder eine Discord Kategorie ODER einen Thread-Channel aus!", ephemeral=True)
+            return await interaction.response.send_message("❌ Bitte wähle entweder eine Discord Kategorie ODER einen Thread-Channel aus!", ephemeral=True)
         await self.cog.save_category(interaction, self, self.cat_id)
         self.stop()
 
@@ -460,7 +464,7 @@ class SupportCog(commands.Cog):
             cat_data = categories.get(cat_id, {})
 
         view = CategorySetupView(self, ctx, cat_id, cat_data)
-        await ctx.send(f"**Setup für Kategorie:** `{cat_id}`\nBitte klicke auf die Buttons, um die Kategorie zu konfigurieren.", view=view)
+        await ctx.send(f"**Setup für Kategorie:** `{cat_id}`\nBitte nutze die Buttons und Menüs, um die Kategorie zu konfigurieren.", view=view)
 
     async def save_category(self, interaction: discord.Interaction, view: CategorySetupView, cat_id: str):
         """Speichert die konfigurierte Kategorie."""
@@ -482,8 +486,6 @@ class SupportCog(commands.Cog):
         
         await interaction.response.send_message(f"✅ Kategorie `{view.name}` erfolgreich gespeichert!", ephemeral=True)
 
-    # --- HIER SIND DIE FEHLENDEN FUNKTIONEN (PLATZHALTER, DAMIT ES LÄDT) ---
-    
     async def create_ticket(self, interaction: discord.Interaction, cat_id: str, issue: str):
         await interaction.response.send_message("Ticket-Erstellung wurde aufgerufen (wird noch implementiert).", ephemeral=True)
 
@@ -506,6 +508,5 @@ class SupportCog(commands.Cog):
     async def finish_base_setup(self, interaction, view):
         await interaction.response.send_message("Setup abgeschlossen!", ephemeral=True)
 
-# !!! DIESE FUNKTION IST FÜR REDBOT ZWINGEND ERFORDERLICH !!!
 async def setup(bot: Red):
     await bot.add_cog(SupportCog(bot))
