@@ -1,9 +1,8 @@
 """
-SupportCog V39 - Fixed Visibility, Permissions, Config Access
-- Admins werden zu privaten Ticket-Threads hinzugefügt
-- Ticket-Ersteller darf keine Support-Buttons nutzen
-- Robuste Fehlerbehandlung beim Schließen
-- Korrekte Config-Zugriffe (kein async with)
+SupportCog V40 - Added Role Sync for Archived Tickets
+- Beim Archivieren werden Rollenmitglieder synchronisiert
+- Neuer Befehl: ticket syncroles
+- Alle vorherigen Fixes beibehalten
 """
 
 import discord
@@ -724,6 +723,46 @@ class SupportCog(commands.Cog):
         filled = max(0, min(filled, length))
         return "🟩" * filled + "⬜" * (length - filled)
 
+    # --- Rollen zu Thread synchronisieren ---
+    async def _sync_roles_to_thread(self, thread: discord.Thread, guild: discord.Guild):
+        """Fügt aktuelle Mitglieder der Support- und High-Team-Rollen sowie Admins zum Thread hinzu."""
+        config = await self.config.guild(guild).all()
+        categories = config.get("categories", {})
+        staff_role_id = None
+        high_role_id = None
+
+        # Für jede Kategorie die Rollen sammeln (normalerweise eine, aber wir nehmen die erste)
+        for cat in categories.values():
+            staff_role_id = cat.get("staff_role_id")
+            high_role_id = cat.get("high_team_role_id")
+            break
+
+        roles_to_add = []
+        if staff_role_id:
+            staff_role = guild.get_role(staff_role_id)
+            if staff_role:
+                roles_to_add.append(staff_role)
+        if high_role_id:
+            high_role = guild.get_role(high_role_id)
+            if high_role:
+                roles_to_add.append(high_role)
+
+        # Admins hinzufügen
+        for member in guild.members:
+            if member.guild_permissions.administrator:
+                try:
+                    await thread.add_user(member)
+                except Exception:
+                    pass
+
+        # Rollenmitglieder hinzufügen
+        for role in roles_to_add:
+            for member in role.members:
+                try:
+                    await thread.add_user(member)
+                except Exception:
+                    pass
+
     # --- Zusammenfassungs-Loop (täglich & wöchentlich) ---
     async def summary_loop(self):
         await self.bot.wait_until_ready()
@@ -924,6 +963,7 @@ class SupportCog(commands.Cog):
                 "- `[p]ticket blacklist @User` / `[p]ticket unblacklist @User` – Nutzer sperren/entsperren.\n"
                 "- `[p]ticket stats` – Statistiken.\n"
                 "- `[p]ticket history @User` – Ticket-Verlauf eines Nutzers.\n"
+                "- `[p]ticket syncroles` – Rollenmitglieder zu allen Tickets synchronisieren.\n"
                 "- `[p]ticket export` – CSV-Export.\n"
                 "- `[p]ticket reset` – Konfiguration zurücksetzen."
             ),
@@ -1194,6 +1234,37 @@ class SupportCog(commands.Cog):
             )
 
         await ctx.send(embed=embed)
+
+    @ticket_cmd.command(name="syncroles")
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def ticket_syncroles(self, ctx: commands.Context):
+        """Synchronisiert die aktuellen Mitglieder der Support-/High-Team-Rollen zu allen Ticket-Threads (aktiv & archiviert)."""
+        guild = ctx.guild
+        # Alle Ticket-Threads sammeln (aktive und archivierte)
+        active_tickets = await self.config.guild(guild).active_tickets()
+        history = await self.config.guild(guild).ticket_history()
+        thread_ids = set()
+
+        for t in active_tickets:
+            thread_ids.add(t["channel_id"])
+        for h in history:
+            thread_ids.add(h["channel_id"])
+
+        count = 0
+        for cid in thread_ids:
+            ch = guild.get_channel(cid)
+            if isinstance(ch, discord.Thread):
+                try:
+                    # Thread entsperren, Mitglieder hinzufügen, wieder sperren
+                    await ch.edit(archived=False, locked=False)
+                    await self._sync_roles_to_thread(ch, guild)
+                    await ch.edit(archived=True, locked=True)
+                    count += 1
+                except Exception as e:
+                    log.error(f"Fehler beim Synchronisieren von {cid}: {e}")
+
+        await ctx.send(f"✅ Rollen wurden zu {count} Ticket-Threads synchronisiert.")
 
     @ticket_cmd.command(name="export")
     async def ticket_export(self, ctx: commands.Context):
@@ -1587,7 +1658,6 @@ class SupportCog(commands.Cog):
                 break
         await self.config.guild(guild).active_tickets.set(tickets)
 
-        # View aktualisieren
         for child in view.children:
             if child.custom_id == "support_ticket_claim_btn":
                 child.label = "Freigeben"
@@ -1790,6 +1860,9 @@ class SupportCog(commands.Cog):
                 if delete_threads:
                     await channel.delete()
                 else:
+                    # Thread entsperren, Rollen synchronisieren, dann archivieren
+                    await channel.edit(archived=False, locked=False)
+                    await self._sync_roles_to_thread(channel, guild)
                     new_name = f"archiviert-{channel.name}"[:100]
                     await channel.edit(name=new_name, archived=True, locked=True)
             else:
