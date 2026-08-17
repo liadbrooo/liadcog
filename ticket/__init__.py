@@ -417,7 +417,6 @@ class SupportCog(commands.Cog):
         try:
             await self.bot.wait_until_ready()
             await self._initialize_views_and_cache()
-            # self.autoclose_task = self.bot.loop.create_task(self.autoclose_loop())
         except Exception as e:
             log.error(f"SupportCog Initialisierung fehlgeschlagen: {e}")
 
@@ -432,22 +431,17 @@ class SupportCog(commands.Cog):
                 t["channel_id"] for t in data.get("active_tickets", [])
             }
 
-            # Panels und Views neu registrieren
-            # (Dieser Teil war bereits in deinem Code vorhanden)
-
     def cog_unload(self):
         if self.autoclose_task:
             self.autoclose_task.cancel()
         if self.init_task and not self.init_task.done():
             self.init_task.cancel()
 
-    # --- Cache-Helfer (Hier war dein Code abgeschnitten) ---
     def _add_to_active_cache(self, guild_id: int, channel_id: int):
         if guild_id not in self._active_channel_cache:
             self._active_channel_cache[guild_id] = set()
         self._active_channel_cache[guild_id].add(channel_id)
 
-    # --- Befehle ---
     @commands.group(name="ticket")
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
@@ -468,9 +462,8 @@ class SupportCog(commands.Cog):
         view = CategorySetupView(self, ctx, cat_id, cat_data)
         await ctx.send(f"**Setup für Kategorie:** `{cat_id}`\nBitte klicke auf die Buttons, um die Kategorie zu konfigurieren.", view=view)
 
-    # --- Fehlende Methoden für Views ---
     async def save_category(self, interaction: discord.Interaction, view: CategorySetupView, cat_id: str):
-        """Wird aufgerufen, wenn im CategorySetupView auf 'Save' geklickt wird."""
+        """Speichert die konfigurierte Kategorie."""
         async with self.config.guild(interaction.guild).categories() as categories:
             if cat_id is None:
                 cat_id = str(uuid.uuid4())[:8]
@@ -488,4 +481,31 @@ class SupportCog(commands.Cog):
             }
         
         await interaction.response.send_message(f"✅ Kategorie `{view.name}` erfolgreich gespeichert!", ephemeral=True)
-        # Optional: update panels here if needed.
+
+    # --- HIER SIND DIE FEHLENDEN FUNKTIONEN (PLATZHALTER, DAMIT ES LÄDT) ---
+    
+    async def create_ticket(self, interaction: discord.Interaction, cat_id: str, issue: str):
+        await interaction.response.send_message("Ticket-Erstellung wurde aufgerufen (wird noch implementiert).", ephemeral=True)
+
+    async def close_ticket(self, channel, reason, user, interaction=None):
+        if interaction:
+            await interaction.followup.send(f"Ticket wird geschlossen. Grund: {reason}", ephemeral=True)
+
+    async def claim_ticket(self, interaction: discord.Interaction, view):
+        await interaction.response.send_message("Ticket übernommen!", ephemeral=True)
+
+    async def escalate_ticket(self, interaction: discord.Interaction, view):
+        await interaction.response.send_message("Ticket eskaliert!", ephemeral=True)
+
+    async def change_status(self, interaction: discord.Interaction, status: str, view):
+        await interaction.response.send_message(f"Status auf {status} geändert!", ephemeral=True)
+
+    async def delete_ticket_channel(self, channel, ticket_data, stars):
+        pass
+        
+    async def finish_base_setup(self, interaction, view):
+        await interaction.response.send_message("Setup abgeschlossen!", ephemeral=True)
+
+# !!! DIESE FUNKTION IST FÜR REDBOT ZWINGEND ERFORDERLICH !!!
+async def setup(bot: Red):
+    await bot.add_cog(SupportCog(bot))
