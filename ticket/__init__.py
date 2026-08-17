@@ -1,8 +1,8 @@
 """
-SupportCog V26 - Final Stable & Robust
+SupportCog V27 - Final Stable & Compatible
+- Verwendet discord.ui.Select statt StringSelect für maximale Kompatibilität
 - Asynchrone Initialisierung verhindert Ladefehler
 - Alle vorherigen Fehler behoben
-- Kompatibel mit RedBot und discord.py 2.x
 """
 
 import discord
@@ -63,14 +63,14 @@ class TicketPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
 
-    @discord.ui.string_select(
+    @discord.ui.select(
         placeholder="🎫 Wähle hier eine Kategorie für dein Ticket aus...",
         custom_id='support_ticket_create_select',
         min_values=1,
         max_values=1,
         options=[discord.SelectOption(label="Lädt...", value="loading")]
     )
-    async def create_ticket_select(self, interaction: discord.Interaction, select: discord.ui.StringSelect):
+    async def create_ticket_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         if select.values[0] == "loading":
             return await interaction.response.send_message(
                 "Bitte warte noch einen Moment, das Panel wird aktualisiert...",
@@ -167,7 +167,7 @@ class TicketControlView(discord.ui.View):
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CloseTicketModal(self.cog))
 
-    @discord.ui.string_select(
+    @discord.ui.select(
         placeholder="Ticket Status ändern...",
         custom_id='support_ticket_status_select',
         min_values=1,
@@ -179,7 +179,7 @@ class TicketControlView(discord.ui.View):
             discord.SelectOption(label="Pausiert", value="PAUSED", emoji="⏸️", description="Ticket ist pausiert.")
         ]
     )
-    async def status_select(self, interaction: discord.Interaction, select: discord.ui.StringSelect):
+    async def status_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         await self.cog.change_status(interaction, select.values[0], self)
 
 
@@ -651,14 +651,12 @@ class SupportCog(commands.Cog):
         }
         self.config.register_guild(**default_guild)
 
-        # Performance-Cache: Guild-ID -> Set von aktiven Ticket-Kanal-IDs
         self._active_channel_cache = {}
-
         self.autoclose_task = None
         self.init_task = None
 
     async def cog_load(self):
-        # Asynchrone Initialisierung starten, um Blockaden zu vermeiden
+        # Starte Initialisierung im Hintergrund, um den Ladevorgang nicht zu blockieren
         self.init_task = self.bot.loop.create_task(self._async_init())
 
     async def _async_init(self):
@@ -676,12 +674,10 @@ class SupportCog(commands.Cog):
             if not guild:
                 continue
 
-            # Cache aufbauen
             self._active_channel_cache[guild_id] = {
                 t["channel_id"] for t in data.get("active_tickets", [])
             }
 
-            # Panels registrieren
             categories = data.get("categories", {})
             active_tickets = data.get("active_tickets", [])
             for panel in data.get("panels", []):
@@ -712,7 +708,7 @@ class SupportCog(commands.Cog):
                             )
                         options = options[:25]
                         for child in view.children:
-                            if isinstance(child, discord.ui.StringSelect):
+                            if isinstance(child, discord.ui.Select):
                                 child.options = options
                     else:
                         view.clear_items()
@@ -720,7 +716,6 @@ class SupportCog(commands.Cog):
                 except Exception as e:
                     log.error(f"Panel-Registrierung fehlgeschlagen für {panel}: {e}")
 
-            # Ticket-Control-Views registrieren
             for ticket in data.get("active_tickets", []):
                 if "panel_msg_id" in ticket and ticket["panel_msg_id"]:
                     try:
@@ -846,18 +841,16 @@ class SupportCog(commands.Cog):
                             changed = True
                             continue
 
-                        # Auto-Close nur bei ACTIVE oder WAITING_USER (WAITING_TEAM und PAUSED pausieren)
+                        # Auto-Close nur bei ACTIVE oder WAITING_USER
                         if t.get("status") in ["WAITING_TEAM", "PAUSED"]:
                             if t.get("status") == "WAITING_TEAM" and auto_esc_hours > 0 and not t.get("escalated"):
                                 lm = datetime.datetime.fromisoformat(t.get("last_message", datetime.datetime.now().isoformat()))
                                 diff_h = (datetime.datetime.now() - lm).total_seconds() / 3600
                                 if diff_h > auto_esc_hours:
-                                    # Auto-Eskalation auslösen
                                     await self.auto_escalate_ticket(guild, t, ch)
                                     t["escalated"] = True
                                     t["last_message"] = datetime.datetime.now().isoformat()
                                     changed = True
-                            # last_message aktualisieren, damit Auto-Close nicht greift
                             t["last_message"] = datetime.datetime.now().isoformat()
                             changed = True
                             continue
@@ -1019,7 +1012,7 @@ class SupportCog(commands.Cog):
         ][:25]
 
         view = discord.ui.View(timeout=300)
-        select = discord.ui.StringSelect(placeholder="Wähle eine Kategorie aus...", options=options)
+        select = discord.ui.Select(placeholder="Wähle eine Kategorie aus...", options=options)
 
         async def select_cb(inter: discord.Interaction):
             if inter.user != ctx.author:
@@ -1135,7 +1128,6 @@ class SupportCog(commands.Cog):
         if not stats and not active_tickets and total_created == 0 and not category_stats:
             return await ctx.send("Noch keine Statistiken vorhanden.")
 
-        # Wenn Kategorie angegeben, filtere
         if category:
             cat_data = None
             for cat_id, c in categories.items():
@@ -1164,13 +1156,11 @@ class SupportCog(commands.Cog):
             else:
                 avg_rating = 0
             embed.add_field(name="Ø Bewertung", value=f"{avg_rating:.2f} / 5", inline=True)
-            # Emoji-Balken für Bewertungen (falls aktiv)
             if await self.config.guild(ctx.guild).use_emoji_charts():
                 bar = self._emoji_bar(avg_rating, 5, 10)
                 embed.add_field(name="Bewertungs-Balken", value=bar, inline=False)
             return await ctx.send(embed=embed)
 
-        # Gesamtübersicht
         total_closed = sum(u.get("closed", 0) for u in stats.values())
         total_open = len(active_tickets)
         total_duration = sum(u.get("total_duration_minutes", 0) for u in stats.values())
@@ -1200,7 +1190,6 @@ class SupportCog(commands.Cog):
             inline=False
         )
 
-        # Leaderboard
         if stats:
             sorted_stats = sorted(stats.items(), key=lambda x: x[1].get("closed", 0), reverse=True)
             desc = ""
@@ -1220,7 +1209,6 @@ class SupportCog(commands.Cog):
                 )
             embed.add_field(name="🏆 Top Support Team", value=desc, inline=False)
 
-        # Kategorie-Statistiken (falls aktiviert)
         if await self.config.guild(ctx.guild).show_category_stats() and category_stats:
             cat_desc = ""
             max_created = max([cs.get("created", 0) for cs in category_stats.values()] or [1])
@@ -1228,7 +1216,6 @@ class SupportCog(commands.Cog):
                 cat_name = categories.get(cat_id, {}).get("name", "Unbekannt")
                 created = cs.get("created", 0)
                 closed = cs.get("closed", 0)
-                # Balken
                 if await self.config.guild(ctx.guild).use_emoji_charts():
                     bar = self._emoji_bar(created, max_created, 10)
                     cat_desc += f"**{cat_name}**: {created} erstellt, {closed} geschlossen {bar}\n"
@@ -1245,7 +1232,6 @@ class SupportCog(commands.Cog):
         category_stats = await self.config.guild(ctx.guild).category_stats()
         categories = await self.config.guild(ctx.guild).categories()
 
-        # Team-Statistiken CSV
         team_csv = io.StringIO()
         team_csv.write("UserID,Name,Claimed,Closed,Reviews,AvgRating,AvgDuration\n")
         for uid, data in stats.items():
@@ -1258,7 +1244,6 @@ class SupportCog(commands.Cog):
             team_csv.write(f"{uid},{name},{data.get('claimed',0)},{data.get('closed',0)},{reviews},{avg_rating:.2f},{avg_duration:.2f}\n")
         team_csv.seek(0)
 
-        # Kategorie-Statistiken CSV
         cat_csv = io.StringIO()
         cat_csv.write("CategoryID,Name,Created,Closed,Reviews,AvgRating,AvgDuration\n")
         for cat_id, cs in category_stats.items():
@@ -1270,7 +1255,6 @@ class SupportCog(commands.Cog):
             cat_csv.write(f"{cat_id},{cat_name},{cs.get('created',0)},{cs.get('closed',0)},{reviews},{avg_rating:.2f},{avg_duration:.2f}\n")
         cat_csv.seek(0)
 
-        # Kombinierte CSV mit beiden Abschnitten
         combined = io.StringIO()
         combined.write("=== Team-Statistiken ===\n")
         combined.write(team_csv.read())
@@ -1345,7 +1329,6 @@ class SupportCog(commands.Cog):
             await ctx.send(f"❌ Fehler: {e}")
 
     async def is_support(self, member: discord.Member, guild: discord.Guild, ticket_data: dict) -> bool:
-        """Prüft, ob ein Mitglied Support-Rechte für das Ticket hat."""
         if member.guild_permissions.manage_guild:
             return True
         cat_data = (await self.config.guild(guild).categories()).get(ticket_data["cat_id"], {})
@@ -1403,7 +1386,7 @@ class SupportCog(commands.Cog):
                 )
             options = options[:25]
             for child in view.children:
-                if isinstance(child, discord.ui.StringSelect):
+                if isinstance(child, discord.ui.Select):
                     child.options = options
 
         msg = await channel.send(embed=embed, view=view)
@@ -1453,11 +1436,10 @@ class SupportCog(commands.Cog):
                     view.clear_items()
                 else:
                     for child in view.children:
-                        if isinstance(child, discord.ui.StringSelect):
+                        if isinstance(child, discord.ui.Select):
                             child.options = options
 
                 await msg.edit(view=view)
-                # Wichtig: Neue View registrieren, damit Interaktionen funktionieren
                 self.bot.add_view(view, message_id=msg.id)
                 valid_panels.append(p)
             except discord.NotFound:
@@ -1538,7 +1520,6 @@ class SupportCog(commands.Cog):
                 ephemeral=True
             )
 
-        # Überlastungsprüfung
         max_tickets_cat = cat_data.get("max_tickets", 10)
         if max_tickets_cat > 0:
             active_count = sum(
@@ -1667,18 +1648,15 @@ class SupportCog(commands.Cog):
         tickets.append(ticket_data)
         await self.config.guild(guild).active_tickets.set(tickets)
 
-        # Gesamtzähler erhöhen
         current_total = await self.config.guild(guild).total_tickets_created()
         await self.config.guild(guild).total_tickets_created.set(current_total + 1)
 
-        # Kategorie-Statistik "created" erhöhen
         category_stats = config.get("category_stats", {})
         cat_stat = category_stats.get(cat_id, {"created": 0, "closed": 0, "stars": [0,0,0,0,0], "total_duration_minutes": 0, "ticket_count": 0})
         cat_stat["created"] += 1
         category_stats[cat_id] = cat_stat
         await self.config.guild(guild).category_stats.set(category_stats)
 
-        # Cache aktualisieren
         self._add_to_active_cache(guild.id, ticket_channel.id)
 
         if config["dm_notifications"]:
@@ -1701,7 +1679,6 @@ class SupportCog(commands.Cog):
             ]
         )
 
-        # Panels aktualisieren, um Auslastung anzuzeigen
         await self.update_panels(guild)
 
         await interaction.followup.send(
@@ -1838,7 +1815,6 @@ class SupportCog(commands.Cog):
             ]
         )
 
-        # Panel aktualisieren, da sich die Auslastung geändert haben könnte
         await self.update_panels(guild)
 
     async def escalate_ticket(self, interaction: discord.Interaction, view: TicketControlView):
@@ -1924,7 +1900,6 @@ class SupportCog(commands.Cog):
         await self.update_panels(guild)
 
     async def auto_escalate_ticket(self, guild: discord.Guild, ticket_data: dict, channel):
-        """Automatische Eskalation bei Inaktivität des Teams (Status WAITING_TEAM)."""
         config = await self.config.guild(guild).all()
         cat_data = config["categories"].get(ticket_data["cat_id"], {})
         if not cat_data.get("high_team_role_id"):
@@ -1963,7 +1938,6 @@ class SupportCog(commands.Cog):
                 )
             await channel.edit(overwrites=overwrites)
 
-        # View aktualisieren: Eskalations-Button deaktivieren
         if ticket_data.get("panel_msg_id"):
             try:
                 msg = await channel.fetch_message(ticket_data["panel_msg_id"])
@@ -2000,8 +1974,6 @@ class SupportCog(commands.Cog):
             [("Ticket", channel.mention), ("Grund", "Team-Inaktivität")]
         )
 
-        # WICHTIG: Keine Config-Speicherung hier, die Schleife übernimmt das.
-
     async def close_ticket(
         self,
         channel: discord.TextChannel,
@@ -2025,7 +1997,6 @@ class SupportCog(commands.Cog):
             except Exception:
                 pass
 
-        # Statistiken aktualisieren: closed + Dauer dem Bearbeiter (Claimer) oder Schließenden gutschreiben
         if not is_auto:
             stats = config.get("stats", {})
             closed_by_id = ticket_data.get("claimed_by") or user.id
@@ -2041,7 +2012,6 @@ class SupportCog(commands.Cog):
             stats[str(closed_by_id)] = user_stat
             await self.config.guild(guild).stats.set(stats)
 
-            # Kategorie-Statistik aktualisieren
             cat_stats = config.get("category_stats", {})
             cat_id = ticket_data["cat_id"]
             cat_stat = cat_stats.get(cat_id, {"created": 0, "closed": 0, "stars": [0,0,0,0,0], "total_duration_minutes": 0, "ticket_count": 0})
@@ -2051,7 +2021,6 @@ class SupportCog(commands.Cog):
             cat_stats[cat_id] = cat_stat
             await self.config.guild(guild).category_stats.set(cat_stats)
 
-        # HTML-Transkript erstellen
         messages_html = ""
         try:
             async for message in channel.history(limit=None, oldest_first=True):
@@ -2111,7 +2080,6 @@ class SupportCog(commands.Cog):
             except Exception:
                 pass
 
-        # Review-View senden oder direkt archivieren/löschen
         if is_auto:
             await self.delete_ticket_channel(channel, ticket_data, 0)
         else:
@@ -2129,7 +2097,6 @@ class SupportCog(commands.Cog):
         guild = channel.guild
         config = await self.config.guild(guild).all()
 
-        # Prüfen, ob Ticket noch existiert (könnte bereits entfernt worden sein)
         if not any(t["channel_id"] == channel.id for t in config["active_tickets"]):
             return
 
@@ -2142,7 +2109,6 @@ class SupportCog(commands.Cog):
             stats[claimer_id] = user_stat
             await self.config.guild(guild).stats.set(stats)
 
-            # Kategorie-Statistik Bewertung hinzufügen
             cat_id = ticket_data["cat_id"]
             cat_stats = config.get("category_stats", {})
             cat_stat = cat_stats.get(cat_id, {"created": 0, "closed": 0, "stars": [0,0,0,0,0], "total_duration_minutes": 0, "ticket_count": 0})
@@ -2175,10 +2141,8 @@ class SupportCog(commands.Cog):
         tickets = [t for t in tickets if t["channel_id"] != channel.id]
         await self.config.guild(guild).active_tickets.set(tickets)
 
-        # Cache aktualisieren
         self._remove_from_active_cache(guild.id, channel.id)
 
-        # Thread löschen oder archivieren, je nach Einstellung
         try:
             if isinstance(channel, discord.Thread):
                 delete_threads = config.get("delete_threads_after_close", False)
@@ -2191,12 +2155,10 @@ class SupportCog(commands.Cog):
         except Exception as e:
             log.error(f"Failed to close ticket channel: {e}")
 
-        # Panels aktualisieren
         await self.update_panels(guild)
 
     @ticket_cmd.command(name="reset")
     async def ticket_reset(self, ctx: commands.Context):
-        """Setzt die Ticket-Konfiguration komplett zurück und schließt alle aktiven Tickets."""
         tickets = await self.config.guild(ctx.guild).active_tickets()
         delete_threads = await self.config.guild(ctx.guild).delete_threads_after_close()
         for t in tickets:
@@ -2213,7 +2175,6 @@ class SupportCog(commands.Cog):
                 except Exception:
                     pass
 
-        # Cache leeren
         self._active_channel_cache[ctx.guild.id] = set()
 
         await self.config.guild(ctx.guild).clear()
