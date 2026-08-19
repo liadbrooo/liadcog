@@ -1,9 +1,9 @@
 """
-SupportCog V46 - Final Complete & Fixed Panel
-- Panel-Embed mit Kategorien, Auslastung, Balken & Prozent
-- Select-Optionen werden korrekt gesetzt
-- Alle vorherigen Funktionen enthalten
-- Stabile Config-Zugriffe, keine async with auf Config
+SupportCog V48 - Final Stable Release
+- Alle Funktionen: Setup, Wizard, Kategorien, Panel, Stats, Verlauf, Zusammenfassungen,
+  Reaktionszeit, Export, Rollen-Sync, Admin-Rolle, High-Team automatisch.
+- Optimierte Ticket-Erstellung (nur konfigurierte Rollen, paralleles Hinzufügen)
+- Stabile Config-Zugriffe, korrekte Berechtigungsprüfungen
 """
 
 import discord
@@ -238,6 +238,48 @@ class SimpleNumberModal(discord.ui.Modal):
         await interaction.response.edit_message(view=self.wizard)
 
 
+class CategoryEditModal(discord.ui.Modal, title="Kategorie bearbeiten"):
+    def __init__(self, cog: "SupportCog", cat_id: str, cat_data: dict):
+        super().__init__()
+        self.cog = cog
+        self.cat_id = cat_id
+
+        self.name_input = discord.ui.TextInput(label="Name", default=cat_data.get("name", ""), max_length=50, required=True)
+        self.desc_input = discord.ui.TextInput(label="Beschreibung", default=cat_data.get("description", ""), max_length=100, required=False)
+        self.abbr_input = discord.ui.TextInput(label="Abkürzung", default=cat_data.get("abbr", ""), max_length=10, required=True)
+        self.emoji_input = discord.ui.TextInput(label="Emoji", default=cat_data.get("emoji", "🎫"), max_length=10, required=False)
+        self.max_tickets_input = discord.ui.TextInput(label="Max aktiv", default=str(cat_data.get("max_tickets", 10)), max_length=3, required=True)
+
+        self.add_item(self.name_input)
+        self.add_item(self.desc_input)
+        self.add_item(self.abbr_input)
+        self.add_item(self.emoji_input)
+        self.add_item(self.max_tickets_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            max_tickets = int(self.max_tickets_input.value)
+        except:
+            return await interaction.response.send_message("❌ Max aktiv muss eine Zahl sein.", ephemeral=True)
+        if max_tickets < 0 or max_tickets > 100:
+            return await interaction.response.send_message("❌ Max aktiv zwischen 0 und 100.", ephemeral=True)
+
+        categories = await self.cog.config.guild(interaction.guild).categories()
+        if self.cat_id not in categories:
+            return await interaction.response.send_message("❌ Kategorie nicht gefunden.", ephemeral=True)
+
+        categories[self.cat_id].update({
+            "name": self.name_input.value,
+            "description": self.desc_input.value or None,
+            "abbr": self.abbr_input.value,
+            "emoji": self.emoji_input.value or "🎫",
+            "max_tickets": max_tickets
+        })
+        await self.cog.config.guild(interaction.guild).categories.set(categories)
+        await self.cog.update_panels(interaction.guild)
+        await interaction.response.send_message("✅ Kategorie aktualisiert!", ephemeral=True)
+
+
 class CategoryAllTextModal(discord.ui.Modal, title="Kategorie Texte"):
     def __init__(self, wizard: 'CategorySetupView'):
         super().__init__()
@@ -382,6 +424,7 @@ class BaseSetupView(discord.ui.View):
         self.cog = cog
         self.ctx = ctx
         self.log_channel_id = None
+        self.admin_role_id = None
         self.dm_notifications = True
         self.autoclose_hours = 48
         self.cooldown_minutes = 0
@@ -400,39 +443,47 @@ class BaseSetupView(discord.ui.View):
         self.log_sel.callback = self._log_select_cb
         self.add_item(self.log_sel)
 
-        self.btn_dm = discord.ui.Button(label="DMs: AN", style=discord.ButtonStyle.success, emoji='✉️', row=1)
+        # Admin-Rolle (optional)
+        admin_options = [discord.SelectOption(label=role.name[:100], value=str(role.id)) for role in self.ctx.guild.roles if not role.managed][:25]
+        if not admin_options:
+            admin_options = [discord.SelectOption(label="Keine Rollen", value="none")]
+        self.admin_sel = discord.ui.Select(placeholder="Admin-Rolle (für private Threads)", options=admin_options, row=1)
+        self.admin_sel.callback = self._admin_select_cb
+        self.add_item(self.admin_sel)
+
+        self.btn_dm = discord.ui.Button(label="DMs: AN", style=discord.ButtonStyle.success, emoji='✉️', row=2)
         self.btn_dm.callback = self._dm_toggle_cb
         self.add_item(self.btn_dm)
 
-        self.btn_auto = discord.ui.Button(label=f"Auto-Close: {self.autoclose_hours}h", style=discord.ButtonStyle.secondary, emoji='⏳', row=1)
+        self.btn_auto = discord.ui.Button(label=f"Auto-Close: {self.autoclose_hours}h", style=discord.ButtonStyle.secondary, emoji='⏳', row=2)
         self.btn_auto.callback = self._auto_cb
         self.add_item(self.btn_auto)
 
-        self.btn_cool = discord.ui.Button(label=f"Cooldown: {self.cooldown_minutes}m", style=discord.ButtonStyle.secondary, emoji='❄️', row=1)
+        self.btn_cool = discord.ui.Button(label=f"Cooldown: {self.cooldown_minutes}m", style=discord.ButtonStyle.secondary, emoji='❄️', row=2)
         self.btn_cool.callback = self._cool_cb
         self.add_item(self.btn_cool)
 
-        self.btn_max = discord.ui.Button(label=f"Max Tickets: {self.max_tickets_per_user}", style=discord.ButtonStyle.secondary, emoji='🔢', row=1)
+        self.btn_max = discord.ui.Button(label=f"Max Tickets: {self.max_tickets_per_user}", style=discord.ButtonStyle.secondary, emoji='🔢', row=2)
         self.btn_max.callback = self._max_cb
         self.add_item(self.btn_max)
 
-        self.btn_del_thread = discord.ui.Button(label="Threads löschen: AUS", style=discord.ButtonStyle.danger, emoji='🗑️', row=2)
+        self.btn_del_thread = discord.ui.Button(label="Threads löschen: AUS", style=discord.ButtonStyle.danger, emoji='🗑️', row=3)
         self.btn_del_thread.callback = self._del_thread_toggle_cb
         self.add_item(self.btn_del_thread)
 
-        self.btn_esc = discord.ui.Button(label=f"Auto-Eskalation: {self.auto_escalate_hours}h", style=discord.ButtonStyle.secondary, emoji='🚨', row=2)
+        self.btn_esc = discord.ui.Button(label=f"Auto-Eskalation: {self.auto_escalate_hours}h", style=discord.ButtonStyle.secondary, emoji='🚨', row=3)
         self.btn_esc.callback = self._esc_cb
         self.add_item(self.btn_esc)
 
-        self.btn_catstats = discord.ui.Button(label="Kategorie-Statistiken: AN", style=discord.ButtonStyle.success, emoji='📊', row=2)
+        self.btn_catstats = discord.ui.Button(label="Kategorie-Statistiken: AN", style=discord.ButtonStyle.success, emoji='📊', row=3)
         self.btn_catstats.callback = self._catstats_toggle_cb
         self.add_item(self.btn_catstats)
 
-        self.btn_emoji = discord.ui.Button(label="Emoji-Balken: AN", style=discord.ButtonStyle.success, emoji='📈', row=2)
+        self.btn_emoji = discord.ui.Button(label="Emoji-Balken: AN", style=discord.ButtonStyle.success, emoji='📈', row=3)
         self.btn_emoji.callback = self._emoji_toggle_cb
         self.add_item(self.btn_emoji)
 
-        self.btn_finish = discord.ui.Button(label="Setup abschließen", style=discord.ButtonStyle.success, emoji='✅', row=3)
+        self.btn_finish = discord.ui.Button(label="Setup abschließen", style=discord.ButtonStyle.success, emoji='✅', row=4)
         self.btn_finish.callback = self._finish_cb
         self.add_item(self.btn_finish)
 
@@ -457,6 +508,16 @@ class BaseSetupView(discord.ui.View):
             self.log_sel.placeholder = f"Log-Channel: #{ch.name}" if ch else "Log-Channel wählen"
         else:
             self.log_sel.placeholder = "Log-Channel wählen"
+        await interaction.response.edit_message(view=self)
+
+    async def _admin_select_cb(self, interaction: discord.Interaction):
+        if self.admin_sel.values[0] != "none":
+            self.admin_role_id = int(self.admin_sel.values[0])
+            role = self.ctx.guild.get_role(self.admin_role_id)
+            self.admin_sel.placeholder = f"Admin-Rolle: {role.name}" if role else "Admin-Rolle wählen"
+        else:
+            self.admin_role_id = None
+            self.admin_sel.placeholder = "Admin-Rolle (für private Threads)"
         await interaction.response.edit_message(view=self)
 
     async def _dm_toggle_cb(self, interaction: discord.Interaction):
@@ -505,6 +566,7 @@ class SupportCog(commands.Cog):
         default_guild = {
             "panels": [],
             "log_channel_id": None,
+            "admin_role_id": None,
             "dm_notifications": True,
             "categories": {},
             "active_tickets": [],
@@ -561,11 +623,13 @@ class SupportCog(commands.Cog):
                         view.clear_items()
                     self.bot.add_view(view, message_id=panel["msg_id"])
 
-                    # Optional: Embed aktualisieren
+                    # Embed aktualisieren
                     try:
-                        msg = await guild.get_channel(panel["channel_id"]).fetch_message(panel["msg_id"])
-                        embed = await self._build_panel_embed(guild)
-                        await msg.edit(embed=embed)
+                        ch = guild.get_channel(panel["channel_id"])
+                        if ch:
+                            msg = await ch.fetch_message(panel["msg_id"])
+                            embed = await self._build_panel_embed(guild)
+                            await msg.edit(embed=embed)
                     except:
                         pass
                 except Exception as e:
@@ -635,7 +699,7 @@ class SupportCog(commands.Cog):
         filled = max(0, min(filled, length))
         return "🟩" * filled + "⬜" * (length - filled)
 
-    # Rollen zu Thread synchronisieren
+    # Rollen zu Thread synchronisieren (optimiert)
     async def _sync_roles_to_thread(self, thread, guild):
         config = await self.config.guild(guild).all()
         categories = config.get("categories", {})
@@ -645,6 +709,7 @@ class SupportCog(commands.Cog):
             staff_role_id = cat.get("staff_role_id")
             high_role_id = cat.get("high_team_role_id")
             break
+
         roles_to_add = []
         if staff_role_id:
             staff_role = guild.get_role(staff_role_id)
@@ -654,18 +719,20 @@ class SupportCog(commands.Cog):
             high_role = guild.get_role(high_role_id)
             if high_role:
                 roles_to_add.append(high_role)
-        for member in guild.members:
-            if member.guild_permissions.administrator:
-                try:
-                    await thread.add_user(member)
-                except:
-                    pass
+
+        # Optionale Admin-Rolle
+        admin_role_id = config.get("admin_role_id")
+        if admin_role_id:
+            admin_role = guild.get_role(admin_role_id)
+            if admin_role:
+                roles_to_add.append(admin_role)
+
+        # Alle Mitglieder der Rollen parallel hinzufügen
+        members_to_add = set()
         for role in roles_to_add:
-            for member in role.members:
-                try:
-                    await thread.add_user(member)
-                except:
-                    pass
+            members_to_add.update(role.members)
+
+        await asyncio.gather(*[thread.add_user(member) for member in members_to_add], return_exceptions=True)
 
     # Zusammenfassungs-Loop
     async def summary_loop(self):
@@ -862,6 +929,19 @@ class SupportCog(commands.Cog):
                 log_channel = await commands.TextChannelConverter().convert(ctx, answer)
             except:
                 await ctx.send("❌ Kanal nicht gefunden. Versuche es erneut.")
+
+        # Admin-Rolle
+        admin_role = None
+        while admin_role is None:
+            answer = await ask("Bitte gib die **Admin-Rolle** an (ID oder Name), die private Threads sehen soll (optional, Enter für keine):")
+            if answer is None: return
+            if answer.strip() == "":
+                admin_role = None
+                break
+            try:
+                admin_role = await commands.RoleConverter().convert(ctx, answer)
+            except:
+                await ctx.send("❌ Rolle nicht gefunden. Versuche es erneut.")
 
         # DM-Benachrichtigungen
         dm_on = None
@@ -1063,6 +1143,7 @@ class SupportCog(commands.Cog):
 
         # Alles speichern
         await self.config.guild(guild).log_channel_id.set(log_channel.id)
+        await self.config.guild(guild).admin_role_id.set(admin_role.id if admin_role else None)
         await self.config.guild(guild).dm_notifications.set(dm_on)
         await self.config.guild(guild).autoclose_hours.set(autoclose)
         await self.config.guild(guild).cooldown_minutes.set(cooldown)
@@ -1077,6 +1158,7 @@ class SupportCog(commands.Cog):
 
         await ctx.send("✅ **Setup abgeschlossen!**\n"
                        f"Log-Channel: {log_channel.mention}\n"
+                       f"Admin-Rolle: {admin_role.mention if admin_role else 'Nicht gesetzt'}\n"
                        f"Kategorien: {len(categories)}\n"
                        f"Panel: {panel_channel.mention if panel_channel else 'Nicht gepostet'}")
 
@@ -1115,18 +1197,20 @@ class SupportCog(commands.Cog):
             btn_edit = discord.ui.Button(label="Bearbeiten", style=discord.ButtonStyle.primary)
             btn_del = discord.ui.Button(label="Löschen", style=discord.ButtonStyle.danger)
             btn_back = discord.ui.Button(label="Abbrechen", style=discord.ButtonStyle.secondary)
+
             async def edit_cb(inter2):
-                setup_view = CategorySetupView(self, ctx, cat_id=cat_id, cat_data=cat_data)
-                await inter2.response.edit_message(embed=discord.Embed(title="Kategorie bearbeiten"), view=setup_view)
-                setup_view.message = inter2.message
+                await inter2.response.send_modal(CategoryEditModal(self, cat_id, cat_data))
+
             async def del_cb(inter2):
                 cats = await self.config.guild(ctx.guild).categories()
                 del cats[cat_id]
                 await self.config.guild(ctx.guild).categories.set(cats)
                 await self.update_panels(ctx.guild)
                 await inter2.response.edit_message(content="Kategorie gelöscht.", view=None)
+
             async def back_cb(inter2):
                 await inter2.response.edit_message(content="Abgebrochen.", view=None)
+
             btn_edit.callback = edit_cb
             btn_del.callback = del_cb
             btn_back.callback = back_cb
@@ -1455,6 +1539,7 @@ class SupportCog(commands.Cog):
     async def finish_base_setup(self, interaction, wizard):
         guild = interaction.guild
         await self.config.guild(guild).log_channel_id.set(wizard.log_channel_id)
+        await self.config.guild(guild).admin_role_id.set(wizard.admin_role_id)
         await self.config.guild(guild).dm_notifications.set(wizard.dm_notifications)
         await self.config.guild(guild).autoclose_hours.set(wizard.autoclose_hours)
         await self.config.guild(guild).cooldown_minutes.set(wizard.cooldown_minutes)
@@ -1499,6 +1584,7 @@ class SupportCog(commands.Cog):
 
         staff_role = guild.get_role(cat_data.get("staff_role_id"))
         high_role = guild.get_role(cat_data.get("high_team_role_id"))
+        admin_role = guild.get_role(config.get("admin_role_id")) if config.get("admin_role_id") else None
 
         channel_name = f"{cat_data['abbr']}-{user.name}-{uuid.uuid4().hex[:4]}"[:100]
         ticket_channel = None
@@ -1509,18 +1595,22 @@ class SupportCog(commands.Cog):
                     raise ValueError("Thread-Channel fehlt")
                 ticket_channel = await parent_ch.create_thread(name=channel_name, type=discord.ChannelType.private_thread)
                 await ticket_channel.add_user(user)
+
+                # Rollenmitglieder parallel hinzufügen
+                roles_to_add = []
                 if staff_role:
-                    for m in staff_role.members:
-                        try: await ticket_channel.add_user(m)
-                        except: pass
+                    roles_to_add.append(staff_role)
                 if high_role:
-                    for m in high_role.members:
-                        try: await ticket_channel.add_user(m)
-                        except: pass
-                for m in guild.members:
-                    if m.guild_permissions.administrator:
-                        try: await ticket_channel.add_user(m)
-                        except: pass
+                    roles_to_add.append(high_role)
+                if admin_role:
+                    roles_to_add.append(admin_role)
+
+                members_to_add = set()
+                for role in roles_to_add:
+                    members_to_add.update(role.members)
+
+                await asyncio.gather(*[ticket_channel.add_user(m) for m in members_to_add], return_exceptions=True)
+
             elif cat_data.get("discord_category_id"):
                 category = guild.get_channel(cat_data["discord_category_id"])
                 if not category:
@@ -1534,9 +1624,8 @@ class SupportCog(commands.Cog):
                     overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
                 if high_role:
                     overwrites[high_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-                for m in guild.members:
-                    if m.guild_permissions.administrator:
-                        overwrites[m] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+                if admin_role:
+                    overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
                 ticket_channel = await guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites)
             else:
                 raise ValueError("Keine Kategorie/Thread konfiguriert")
