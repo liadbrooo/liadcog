@@ -1,6 +1,9 @@
 """
-SupportCog V45 - Final Stable Release
-Enthält alle Features und behebt alle bekannten Fehler.
+SupportCog V46 - Final Complete & Fixed Panel
+- Panel-Embed mit Kategorien, Auslastung, Balken & Prozent
+- Select-Optionen werden korrekt gesetzt
+- Alle vorherigen Funktionen enthalten
+- Stabile Config-Zugriffe, keine async with auf Config
 """
 
 import discord
@@ -557,6 +560,14 @@ class SupportCog(commands.Cog):
                     else:
                         view.clear_items()
                     self.bot.add_view(view, message_id=panel["msg_id"])
+
+                    # Optional: Embed aktualisieren
+                    try:
+                        msg = await guild.get_channel(panel["channel_id"]).fetch_message(panel["msg_id"])
+                        embed = await self._build_panel_embed(guild)
+                        await msg.edit(embed=embed)
+                    except:
+                        pass
                 except Exception as e:
                     log.error(f"Panel-Registrierung fehlgeschlagen: {e}")
             for ticket in data.get("active_tickets", []):
@@ -1139,7 +1150,7 @@ class SupportCog(commands.Cog):
         for child in view.children:
             if isinstance(child, discord.ui.Select):
                 child.options = options
-        embed = discord.Embed(title="🎫 Support", description="Wähle eine Kategorie.", color=discord.Color.blurple())
+        embed = await self._build_panel_embed(ctx.guild)
         msg = await channel.send(embed=embed, view=view)
         panels = await self.config.guild(ctx.guild).panels()
         panels.append({"channel_id": channel.id, "msg_id": msg.id})
@@ -1369,6 +1380,54 @@ class SupportCog(commands.Cog):
             options.append(discord.SelectOption(label=label, value=cat_id, description=description, emoji=c.get("emoji")))
         return options[:25]
 
+    async def _build_panel_embed(self, guild):
+        categories = await self.config.guild(guild).categories()
+        active_tickets = await self.config.guild(guild).active_tickets()
+
+        embed = discord.Embed(
+            title="🎫 Support Ticket System",
+            description=(
+                "Brauchst du Hilfe? Wähle unten im Dropdown-Menü die passende Kategorie aus.\n"
+                "Die Auslastung zeigt, wie viele Tickets aktuell in Bearbeitung sind."
+            ),
+            color=discord.Color.blurple()
+        )
+        embed.set_footer(text=f"{guild.name} Support Team")
+
+        if not categories:
+            embed.add_field(
+                name="⚠️ Hinweis",
+                value="Es wurden noch keine Kategorien erstellt. Ein Admin muss `[p]ticket addcat` nutzen.",
+                inline=False
+            )
+            return embed
+
+        for cat_id, cat_data in categories.items():
+            active_count = sum(
+                1 for t in active_tickets
+                if t["cat_id"] == cat_id and t.get("status") == "ACTIVE"
+            )
+            max_tickets = cat_data.get("max_tickets", 10)
+            emoji = cat_data.get("emoji", "🎫")
+            name = cat_data.get("name", "Unbekannt")
+
+            if max_tickets > 0:
+                percent = int((active_count / max_tickets) * 100)
+                filled = int((active_count / max_tickets) * 10)
+                filled = max(0, min(filled, 10))
+                bar = "🟩" * filled + "⬜" * (10 - filled)
+                status = f"{active_count}/{max_tickets} {bar} {percent}%"
+            else:
+                status = f"{active_count} aktiv (unbegrenzt)"
+
+            embed.add_field(
+                name=f"{emoji} {name}",
+                value=f"`{status}`",
+                inline=True
+            )
+
+        return embed
+
     async def update_panels(self, guild):
         categories = await self.config.guild(guild).categories()
         active_tickets = await self.config.guild(guild).active_tickets()
@@ -1385,7 +1444,8 @@ class SupportCog(commands.Cog):
                 for child in view.children:
                     if isinstance(child, discord.ui.Select):
                         child.options = options
-                await msg.edit(view=view)
+                embed = await self._build_panel_embed(guild)
+                await msg.edit(embed=embed, view=view)
                 self.bot.add_view(view, message_id=msg.id)
                 valid.append(p)
             except:
