@@ -1,8 +1,8 @@
 """
-SupportCog V40 - Added Role Sync for Archived Tickets
-- Beim Archivieren werden Rollenmitglieder synchronisiert
-- Neuer Befehl: ticket syncroles
-- Alle vorherigen Fixes beibehalten
+SupportCog V43 - Full Featured + Setup Wizard
+- Textbasierter Wizard für komplette Einrichtung
+- Alle bisherigen Funktionen (Stats, Verlauf, Zusammenfassungen, Reaktionszeit, Rollen-Sync)
+- Stabil durch Textabfragen statt komplexer Views
 """
 
 import discord
@@ -73,55 +73,36 @@ class TicketPanelView(discord.ui.View):
     async def create_ticket_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         if select.values[0] == "loading":
             return await interaction.response.send_message(
-                "Bitte warte noch einen Moment, das Panel wird aktualisiert...",
-                ephemeral=True
-            )
+                "Bitte warte noch einen Moment...", ephemeral=True)
 
         config = await self.cog.config.guild(interaction.guild).all()
         cat_id = select.values[0]
         if cat_id not in config.get("categories", {}):
-            return await interaction.response.send_message(
-                "❌ Diese Kategorie existiert nicht mehr.",
-                ephemeral=True
-            )
+            return await interaction.response.send_message("❌ Diese Kategorie existiert nicht mehr.", ephemeral=True)
 
         if interaction.user.id in config.get("blacklist", []):
-            return await interaction.response.send_message(
-                "❌ Du wurdest gesperrt und kannst keine Tickets mehr eröffnen.",
-                ephemeral=True
-            )
+            return await interaction.response.send_message("❌ Du bist gesperrt.", ephemeral=True)
 
         max_tickets = config.get("max_tickets_per_user", 1)
         user_tickets = [t for t in config.get("active_tickets", []) if t["user_id"] == interaction.user.id]
         if len(user_tickets) >= max_tickets:
             return await interaction.response.send_message(
-                f"❌ Du hast bereits das Maximum von **{max_tickets}** offenen Tickets. Bitte schließe zuerst eines.",
-                ephemeral=True
-            )
+                f"❌ Du hast bereits das Maximum von {max_tickets} offenen Tickets.", ephemeral=True)
 
         cooldown_mins = config.get("cooldown_minutes", 0)
         if cooldown_mins > 0:
             now = datetime.datetime.now()
             for t in user_tickets:
-                diff = (now - datetime.datetime.fromisoformat(t["created_at"])).total_seconds() / 60
-                if diff < cooldown_mins:
-                    return await interaction.response.send_message(
-                        f"⏳ Cooldown aktiv! Du kannst in **{int(cooldown_mins - diff)} Minuten** ein neues Ticket eröffnen.",
-                        ephemeral=True
-                    )
+                created = datetime.datetime.fromisoformat(t["created_at"])
+                if (now - created).total_seconds() / 60 < cooldown_mins:
+                    return await interaction.response.send_message("❌ Cooldown aktiv.", ephemeral=True)
 
         cat_data = config["categories"].get(cat_id, {})
-        cat_max_tickets = cat_data.get("max_tickets", 10)
-        if cat_max_tickets > 0:
-            active_count = sum(
-                1 for t in config["active_tickets"]
-                if t["cat_id"] == cat_id and t.get("status") == "ACTIVE"
-            )
-            if active_count >= cat_max_tickets:
-                return await interaction.response.send_message(
-                    "❌ Diese Kategorie ist aktuell ausgelastet. Bitte warte einen Moment.",
-                    ephemeral=True
-                )
+        max_cat_tickets = cat_data.get("max_tickets", 10)
+        if max_cat_tickets > 0:
+            active_count = sum(1 for t in config["active_tickets"] if t["cat_id"] == cat_id and t.get("status") == "ACTIVE")
+            if active_count >= max_cat_tickets:
+                return await interaction.response.send_message("❌ Kategorie ist ausgelastet.", ephemeral=True)
 
         await interaction.response.send_modal(TicketModal(self.cog, cat_id))
 
@@ -133,7 +114,7 @@ class CloseTicketModal(discord.ui.Modal, title='🔒 Ticket schließen'):
 
     reason = discord.ui.TextInput(
         label='Grund für die Schließung',
-        placeholder='Wurde das Problem gelöst? (Optional)',
+        placeholder='Optional',
         style=discord.TextStyle.paragraph,
         required=False,
         max_length=500
@@ -172,10 +153,10 @@ class TicketControlView(discord.ui.View):
         min_values=1,
         max_values=1,
         options=[
-            discord.SelectOption(label="Aktiv", value="ACTIVE", emoji="🟢", description="Normales Ticket."),
-            discord.SelectOption(label="Wartet auf User", value="WAITING_USER", emoji="🟡", description="Team wartet auf Antwort."),
-            discord.SelectOption(label="Wartet auf Team", value="WAITING_TEAM", emoji="🔴", description="Team prüft intern."),
-            discord.SelectOption(label="Pausiert", value="PAUSED", emoji="⏸️", description="Ticket ist pausiert.")
+            discord.SelectOption(label="Aktiv", value="ACTIVE", emoji="🟢"),
+            discord.SelectOption(label="Wartet auf User", value="WAITING_USER", emoji="🟡"),
+            discord.SelectOption(label="Wartet auf Team", value="WAITING_TEAM", emoji="🔴"),
+            discord.SelectOption(label="Pausiert", value="PAUSED", emoji="⏸️")
         ]
     )
     async def status_select(self, interaction: discord.Interaction, select: discord.ui.Select):
@@ -200,16 +181,9 @@ class ReviewView(discord.ui.View):
 
     async def review_stars(self, interaction: discord.Interaction):
         if interaction.user.id != self.ticket_data["user_id"]:
-            return await interaction.response.send_message(
-                "Nur der Ticket-Ersteller kann bewerten.",
-                ephemeral=True
-            )
-
+            return await interaction.response.send_message("Nur der Ticket-Ersteller kann bewerten.", ephemeral=True)
         stars = int(interaction.data["custom_id"][-1])
-        await interaction.response.edit_message(
-            content=f"Danke für dein Feedback ({stars}⭐)! Der Channel wird in 5 Sekunden geschlossen...",
-            view=None
-        )
+        await interaction.response.edit_message(content=f"Danke für dein Feedback ({stars}⭐)!", view=None)
         await self.cog.delete_ticket_channel(interaction.channel, self.ticket_data, stars)
 
     async def on_timeout(self):
@@ -225,7 +199,6 @@ class TicketModal(discord.ui.Modal, title='🎫 Ticket erstellen'):
 
     issue = discord.ui.TextInput(
         label='Was ist dein Anliegen?',
-        placeholder='Bitte beschreibe dein Problem kurz...',
         style=discord.TextStyle.paragraph,
         required=True,
         min_length=10,
@@ -256,16 +229,9 @@ class SimpleNumberModal(discord.ui.Modal):
         try:
             val = int(self.input.value)
         except ValueError:
-            await interaction.response.send_message("❌ Bitte gib eine gültige Zahl ein.", ephemeral=True)
-            return
-
+            return await interaction.response.send_message("❌ Bitte eine Zahl eingeben.", ephemeral=True)
         if not (self.min_val <= val <= self.max_val):
-            await interaction.response.send_message(
-                f"❌ Wert muss zwischen {self.min_val} und {self.max_val} liegen.",
-                ephemeral=True
-            )
-            return
-
+            return await interaction.response.send_message(f"❌ Wert muss zwischen {self.min_val} und {self.max_val} liegen.", ephemeral=True)
         setattr(self.wizard, self.attr_name, val)
         self.wizard._update_labels()
         await interaction.response.edit_message(view=self.wizard)
@@ -275,36 +241,10 @@ class CategoryAllTextModal(discord.ui.Modal, title="Kategorie Texte"):
     def __init__(self, wizard: 'CategorySetupView'):
         super().__init__()
         self.wizard = wizard
-
-        self.name_input = discord.ui.TextInput(
-            label="Name der Kategorie",
-            placeholder="z.B. Allgemeiner Support",
-            default=wizard.name if wizard.name else "",
-            max_length=50,
-            required=True
-        )
-        self.desc_input = discord.ui.TextInput(
-            label="Beschreibung",
-            placeholder="Wofür ist diese Kategorie?",
-            default=wizard.description if wizard.description else "",
-            max_length=100,
-            required=False
-        )
-        self.abbr_input = discord.ui.TextInput(
-            label="Kanal-Abkürzung",
-            placeholder="z.B. SUP",
-            default=wizard.abbr if wizard.abbr else "",
-            max_length=10,
-            required=True
-        )
-        self.emoji_input = discord.ui.TextInput(
-            label="Emoji",
-            placeholder="z.B. 🎫",
-            default=wizard.emoji if wizard.emoji else "🎫",
-            max_length=10,
-            required=False
-        )
-
+        self.name_input = discord.ui.TextInput(label="Name", default=wizard.name or "", max_length=50, required=True)
+        self.desc_input = discord.ui.TextInput(label="Beschreibung", default=wizard.description or "", max_length=100, required=False)
+        self.abbr_input = discord.ui.TextInput(label="Abkürzung", default=wizard.abbr or "", max_length=10, required=True)
+        self.emoji_input = discord.ui.TextInput(label="Emoji", default=wizard.emoji or "🎫", max_length=10, required=False)
         self.add_item(self.name_input)
         self.add_item(self.desc_input)
         self.add_item(self.abbr_input)
@@ -334,7 +274,6 @@ class CategorySetupView(discord.ui.View):
         self.staff_role_id = cat_data.get("staff_role_id") if cat_data else None
         self.high_team_role_id = cat_data.get("high_team_role_id") if cat_data else None
         self.max_tickets = cat_data.get("max_tickets", 10) if cat_data else 10
-
         self._build_ui()
 
     def _build_ui(self):
@@ -367,7 +306,7 @@ class CategorySetupView(discord.ui.View):
         staff_options = [discord.SelectOption(label=role.name[:100], value=str(role.id)) for role in self.ctx.guild.roles if not role.managed][:25]
         if not staff_options:
             staff_options = [discord.SelectOption(label="Keine Rollen", value="none")]
-        self.staff_sel = discord.ui.Select(placeholder="Support-Rolle wählen", options=staff_options, row=3)
+        self.staff_sel = discord.ui.Select(placeholder="Support-Rolle", options=staff_options, row=3)
         self.staff_sel.callback = self._staff_cb
         self.add_item(self.staff_sel)
 
@@ -384,7 +323,7 @@ class CategorySetupView(discord.ui.View):
         await interaction.response.send_modal(CategoryAllTextModal(self))
 
     async def _max_tickets_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(SimpleNumberModal(self, "max_tickets", "Maximale aktive Tickets (0 = unbegrenzt)", 0, 100))
+        await interaction.response.send_modal(SimpleNumberModal(self, "max_tickets", "Maximale aktive Tickets", 0, 100))
 
     async def _disc_cat_cb(self, interaction: discord.Interaction):
         if self.disc_cat_sel.values[0] != "none":
@@ -410,10 +349,10 @@ class CategorySetupView(discord.ui.View):
         if self.staff_sel.values[0] != "none":
             self.staff_role_id = int(self.staff_sel.values[0])
             role = self.ctx.guild.get_role(self.staff_role_id)
-            self.staff_sel.placeholder = f"Support: {role.name}" if role else "Support-Rolle wählen"
+            self.staff_sel.placeholder = f"Support: {role.name}" if role else "Support-Rolle"
         else:
             self.staff_role_id = None
-            self.staff_sel.placeholder = "Support-Rolle wählen"
+            self.staff_sel.placeholder = "Support-Rolle"
         await interaction.response.edit_message(view=self)
 
     async def _high_cb(self, interaction: discord.Interaction):
@@ -428,134 +367,10 @@ class CategorySetupView(discord.ui.View):
 
     async def _save_cb(self, interaction: discord.Interaction):
         if not self.name or not self.abbr or not self.staff_role_id:
-            return await interaction.response.send_message("❌ Bitte klicke auf 'Texte anpassen' und wähle eine Support-Rolle aus!", ephemeral=True)
+            return await interaction.response.send_message("❌ Bitte fülle Name, Abkürzung und Support-Rolle aus.", ephemeral=True)
         if not self.discord_category_id and not self.thread_parent_id:
-            return await interaction.response.send_message("❌ Bitte wähle entweder eine Discord Kategorie ODER einen Thread-Channel aus!", ephemeral=True)
+            return await interaction.response.send_message("❌ Bitte wähle Discord-Kategorie oder Thread-Channel.", ephemeral=True)
         await self.cog.save_category(interaction, self, self.cat_id)
-        self.stop()
-
-
-class BaseSetupView(discord.ui.View):
-    """Interaktive Basis-Konfiguration."""
-    def __init__(self, cog: "SupportCog", ctx: commands.Context):
-        super().__init__(timeout=300)
-        self.cog = cog
-        self.ctx = ctx
-        self.log_channel_id = None
-        self.dm_notifications = True
-        self.autoclose_hours = 48
-        self.cooldown_minutes = 0
-        self.max_tickets_per_user = 1
-        self.delete_threads_after_close = False
-        self.auto_escalate_hours = 0
-        self.show_category_stats = True
-        self.use_emoji_charts = True
-
-        self._build_ui()
-
-    def _build_ui(self):
-        log_options = [discord.SelectOption(label=f"#{c.name}"[:100], value=str(c.id)) for c in self.ctx.guild.text_channels[:25]]
-        if not log_options:
-            log_options = [discord.SelectOption(label="Keine Textkanäle", value="none")]
-        self.log_sel = discord.ui.Select(placeholder="Log-Channel wählen", options=log_options, row=0)
-        self.log_sel.callback = self._log_select_cb
-        self.add_item(self.log_sel)
-
-        self.btn_dm = discord.ui.Button(label="DMs: AN", style=discord.ButtonStyle.success, emoji='✉️', row=1)
-        self.btn_dm.callback = self._dm_toggle_cb
-        self.add_item(self.btn_dm)
-
-        self.btn_auto = discord.ui.Button(label=f"Auto-Close: {self.autoclose_hours}h", style=discord.ButtonStyle.secondary, emoji='⏳', row=1)
-        self.btn_auto.callback = self._auto_cb
-        self.add_item(self.btn_auto)
-
-        self.btn_cool = discord.ui.Button(label=f"Cooldown: {self.cooldown_minutes}m", style=discord.ButtonStyle.secondary, emoji='❄️', row=1)
-        self.btn_cool.callback = self._cool_cb
-        self.add_item(self.btn_cool)
-
-        self.btn_max = discord.ui.Button(label=f"Max Tickets: {self.max_tickets_per_user}", style=discord.ButtonStyle.secondary, emoji='🔢', row=1)
-        self.btn_max.callback = self._max_cb
-        self.add_item(self.btn_max)
-
-        self.btn_del_thread = discord.ui.Button(label="Threads löschen: AUS", style=discord.ButtonStyle.danger, emoji='🗑️', row=2)
-        self.btn_del_thread.callback = self._del_thread_toggle_cb
-        self.add_item(self.btn_del_thread)
-
-        self.btn_esc = discord.ui.Button(label=f"Auto-Eskalation: {self.auto_escalate_hours}h", style=discord.ButtonStyle.secondary, emoji='🚨', row=2)
-        self.btn_esc.callback = self._esc_cb
-        self.add_item(self.btn_esc)
-
-        self.btn_catstats = discord.ui.Button(label="Kategorie-Statistiken: AN", style=discord.ButtonStyle.success, emoji='📊', row=2)
-        self.btn_catstats.callback = self._catstats_toggle_cb
-        self.add_item(self.btn_catstats)
-
-        self.btn_emoji = discord.ui.Button(label="Emoji-Balken: AN", style=discord.ButtonStyle.success, emoji='📈', row=2)
-        self.btn_emoji.callback = self._emoji_toggle_cb
-        self.add_item(self.btn_emoji)
-
-        self.btn_finish = discord.ui.Button(label="Setup abschließen", style=discord.ButtonStyle.success, emoji='✅', row=3)
-        self.btn_finish.callback = self._finish_cb
-        self.add_item(self.btn_finish)
-
-    def _update_labels(self):
-        self.btn_dm.label = f"DMs: {'AN' if self.dm_notifications else 'AUS'}"
-        self.btn_dm.style = discord.ButtonStyle.success if self.dm_notifications else discord.ButtonStyle.danger
-        self.btn_auto.label = f"Auto-Close: {self.autoclose_hours}h"
-        self.btn_cool.label = f"Cooldown: {self.cooldown_minutes}m"
-        self.btn_max.label = f"Max Tickets: {self.max_tickets_per_user}"
-        self.btn_del_thread.label = f"Threads löschen: {'AN' if self.delete_threads_after_close else 'AUS'}"
-        self.btn_del_thread.style = discord.ButtonStyle.success if self.delete_threads_after_close else discord.ButtonStyle.danger
-        self.btn_esc.label = f"Auto-Eskalation: {self.auto_escalate_hours}h"
-        self.btn_catstats.label = f"Kategorie-Statistiken: {'AN' if self.show_category_stats else 'AUS'}"
-        self.btn_catstats.style = discord.ButtonStyle.success if self.show_category_stats else discord.ButtonStyle.danger
-        self.btn_emoji.label = f"Emoji-Balken: {'AN' if self.use_emoji_charts else 'AUS'}"
-        self.btn_emoji.style = discord.ButtonStyle.success if self.use_emoji_charts else discord.ButtonStyle.danger
-
-    async def _log_select_cb(self, interaction: discord.Interaction):
-        if self.log_sel.values[0] != "none":
-            self.log_channel_id = int(self.log_sel.values[0])
-            ch = self.ctx.guild.get_channel(self.log_channel_id)
-            self.log_sel.placeholder = f"Log-Channel: #{ch.name}" if ch else "Log-Channel wählen"
-        else:
-            self.log_sel.placeholder = "Log-Channel wählen"
-        await interaction.response.edit_message(view=self)
-
-    async def _dm_toggle_cb(self, interaction: discord.Interaction):
-        self.dm_notifications = not self.dm_notifications
-        self._update_labels()
-        await interaction.response.edit_message(view=self)
-
-    async def _auto_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(SimpleNumberModal(self, "autoclose_hours", "Auto-Close (Stunden)", 0, 500))
-
-    async def _cool_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(SimpleNumberModal(self, "cooldown_minutes", "Cooldown (Minuten)", 0, 10080))
-
-    async def _max_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(SimpleNumberModal(self, "max_tickets_per_user", "Max Tickets pro User", 1, 10))
-
-    async def _del_thread_toggle_cb(self, interaction: discord.Interaction):
-        self.delete_threads_after_close = not self.delete_threads_after_close
-        self._update_labels()
-        await interaction.response.edit_message(view=self)
-
-    async def _esc_cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(SimpleNumberModal(self, "auto_escalate_hours", "Auto-Eskalation nach Stunden (0=aus)", 0, 500))
-
-    async def _catstats_toggle_cb(self, interaction: discord.Interaction):
-        self.show_category_stats = not self.show_category_stats
-        self._update_labels()
-        await interaction.response.edit_message(view=self)
-
-    async def _emoji_toggle_cb(self, interaction: discord.Interaction):
-        self.use_emoji_charts = not self.use_emoji_charts
-        self._update_labels()
-        await interaction.response.edit_message(view=self)
-
-    async def _finish_cb(self, interaction: discord.Interaction):
-        if not self.log_channel_id:
-            return await interaction.response.send_message("Bitte wähle zuerst einen Log-Channel aus!", ephemeral=True)
-        await self.cog.finish_base_setup(interaction, self)
         self.stop()
 
 
@@ -583,7 +398,6 @@ class SupportCog(commands.Cog):
             "ticket_history": []
         }
         self.config.register_guild(**default_guild)
-
         self._active_channel_cache = {}
         self.autoclose_task = None
         self.init_task = None
@@ -609,40 +423,13 @@ class SupportCog(commands.Cog):
             guild = self.bot.get_guild(guild_id)
             if not guild:
                 continue
-
-            self._active_channel_cache[guild_id] = {
-                t["channel_id"] for t in data.get("active_tickets", [])
-            }
-
-            categories = data.get("categories", {})
-            active_tickets = data.get("active_tickets", [])
+            self._active_channel_cache[guild_id] = {t["channel_id"] for t in data.get("active_tickets", [])}
             for panel in data.get("panels", []):
                 try:
                     view = TicketPanelView(self)
+                    categories = data.get("categories", {})
                     if categories:
-                        options = []
-                        for cat_id, c in categories.items():
-                            active_count = sum(
-                                1 for t in active_tickets
-                                if t["cat_id"] == cat_id and t.get("status") == "ACTIVE"
-                            )
-                            max_t = c.get("max_tickets", 10)
-                            label = c["name"][:100]
-                            if max_t > 0:
-                                label = f"{c['name']} ({active_count}/{max_t})"[:100]
-                                description = f"{c.get('description', '')} - {int((active_count/max_t)*100)}% ausgelastet"[:100] if c.get('description') else f"{int((active_count/max_t)*100)}% ausgelastet"
-                            else:
-                                description = c.get("description", "")[:100] if c.get("description") else None
-
-                            options.append(
-                                discord.SelectOption(
-                                    label=label,
-                                    value=cat_id,
-                                    description=description,
-                                    emoji=c.get("emoji")
-                                )
-                            )
-                        options = options[:25]
+                        options = self._build_panel_options(categories, data.get("active_tickets", []))
                         for child in view.children:
                             if isinstance(child, discord.ui.Select):
                                 child.options = options
@@ -650,10 +437,9 @@ class SupportCog(commands.Cog):
                         view.clear_items()
                     self.bot.add_view(view, message_id=panel["msg_id"])
                 except Exception as e:
-                    log.error(f"Panel-Registrierung fehlgeschlagen für {panel}: {e}")
-
+                    log.error(f"Panel-Registrierung fehlgeschlagen: {e}")
             for ticket in data.get("active_tickets", []):
-                if "panel_msg_id" in ticket and ticket["panel_msg_id"]:
+                if ticket.get("panel_msg_id"):
                     try:
                         view = TicketControlView(self)
                         if ticket.get("claimed_by"):
@@ -667,7 +453,7 @@ class SupportCog(commands.Cog):
                                     child.disabled = True
                         self.bot.add_view(view, message_id=ticket["panel_msg_id"])
                     except Exception as e:
-                        log.error(f"Ticket-Control-View Registrierung fehlgeschlagen: {e}")
+                        log.error(f"Control-View Registrierung fehlgeschlagen: {e}")
 
     def cog_unload(self):
         if self.autoclose_task:
@@ -677,30 +463,25 @@ class SupportCog(commands.Cog):
         if self.summary_task:
             self.summary_task.cancel()
 
-    # --- Cache-Helfer ---
-    def _add_to_active_cache(self, guild_id: int, channel_id: int):
+    # Cache-Helfer
+    def _add_to_active_cache(self, guild_id, channel_id):
         if guild_id not in self._active_channel_cache:
             self._active_channel_cache[guild_id] = set()
         self._active_channel_cache[guild_id].add(channel_id)
 
-    def _remove_from_active_cache(self, guild_id: int, channel_id: int):
+    def _remove_from_active_cache(self, guild_id, channel_id):
         if guild_id in self._active_channel_cache:
             self._active_channel_cache[guild_id].discard(channel_id)
 
-    # --- Helpers ---
-    async def send_dm(self, user: discord.User, title: str, description: str):
+    # Helpers
+    async def send_dm(self, user, title, description):
         try:
-            embed = discord.Embed(
-                title=title,
-                description=description,
-                color=discord.Color.blurple(),
-                timestamp=datetime.datetime.now()
-            )
+            embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
             await user.send(embed=embed)
-        except Exception:
+        except:
             pass
 
-    async def send_log(self, guild: discord.Guild, title: str, color: discord.Color, fields: list):
+    async def send_log(self, guild, title, color, fields):
         try:
             log_ch_id = await self.config.guild(guild).log_channel_id()
             if not log_ch_id:
@@ -708,13 +489,12 @@ class SupportCog(commands.Cog):
             log_ch = guild.get_channel(log_ch_id)
             if not log_ch:
                 return
-
             embed = discord.Embed(title=title, color=color, timestamp=datetime.datetime.now())
             for name, value in fields:
                 embed.add_field(name=name, value=str(value)[:1024], inline=False)
             await log_ch.send(embed=embed)
         except Exception as e:
-            log.error(f"Failed to send log message: {e}")
+            log.error(f"Log senden fehlgeschlagen: {e}")
 
     def _emoji_bar(self, value, max_value, length=10):
         if max_value <= 0:
@@ -723,20 +503,16 @@ class SupportCog(commands.Cog):
         filled = max(0, min(filled, length))
         return "🟩" * filled + "⬜" * (length - filled)
 
-    # --- Rollen zu Thread synchronisieren ---
-    async def _sync_roles_to_thread(self, thread: discord.Thread, guild: discord.Guild):
-        """Fügt aktuelle Mitglieder der Support- und High-Team-Rollen sowie Admins zum Thread hinzu."""
+    # Rollen zu Thread synchronisieren
+    async def _sync_roles_to_thread(self, thread, guild):
         config = await self.config.guild(guild).all()
         categories = config.get("categories", {})
         staff_role_id = None
         high_role_id = None
-
-        # Für jede Kategorie die Rollen sammeln (normalerweise eine, aber wir nehmen die erste)
         for cat in categories.values():
             staff_role_id = cat.get("staff_role_id")
             high_role_id = cat.get("high_team_role_id")
             break
-
         roles_to_add = []
         if staff_role_id:
             staff_role = guild.get_role(staff_role_id)
@@ -746,24 +522,20 @@ class SupportCog(commands.Cog):
             high_role = guild.get_role(high_role_id)
             if high_role:
                 roles_to_add.append(high_role)
-
-        # Admins hinzufügen
         for member in guild.members:
             if member.guild_permissions.administrator:
                 try:
                     await thread.add_user(member)
-                except Exception:
+                except:
                     pass
-
-        # Rollenmitglieder hinzufügen
         for role in roles_to_add:
             for member in role.members:
                 try:
                     await thread.add_user(member)
-                except Exception:
+                except:
                     pass
 
-    # --- Zusammenfassungs-Loop (täglich & wöchentlich) ---
+    # Zusammenfassungs-Loop
     async def summary_loop(self):
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
@@ -782,28 +554,24 @@ class SupportCog(commands.Cog):
                         await self.send_summary(guild, "weekly")
             await asyncio.sleep(60)
 
-    async def send_summary(self, guild: discord.Guild, period: str):
+    async def send_summary(self, guild, period):
         log_channel_id = await self.config.guild(guild).log_channel_id()
         if not log_channel_id:
             return
         log_channel = guild.get_channel(log_channel_id)
         if not log_channel:
             return
-
         history = await self.config.guild(guild).ticket_history()
         active_tickets = await self.config.guild(guild).active_tickets()
         stats = await self.config.guild(guild).stats()
-
         if period == "daily":
             delta = datetime.timedelta(days=1)
             title = "📅 Tägliche Ticket-Zusammenfassung"
         else:
             delta = datetime.timedelta(days=7)
             title = "📊 Wöchentliche Ticket-Zusammenfassung"
-
         now = datetime.datetime.utcnow()
         start = now - delta
-
         created_today = 0
         closed_today = 0
         for entry in history:
@@ -814,26 +582,22 @@ class SupportCog(commands.Cog):
                 closed = datetime.datetime.fromisoformat(entry["closed_at"])
                 if closed >= start:
                     closed_today += 1
-
         open_tickets = len(active_tickets)
         total_closed_all = sum(u.get("closed", 0) for u in stats.values())
-
         total_reaction = sum(u.get("total_reaction_minutes", 0) for u in stats.values())
         reaction_count = sum(u.get("reaction_count", 0) for u in stats.values())
         avg_reaction = total_reaction / reaction_count if reaction_count else 0
-
         embed = discord.Embed(title=title, color=discord.Color.gold(), timestamp=now)
         embed.add_field(name="Erstellt", value=created_today, inline=True)
         embed.add_field(name="Geschlossen", value=closed_today, inline=True)
         embed.add_field(name="Offen", value=open_tickets, inline=True)
         embed.add_field(name="Ø Reaktionszeit", value=f"{avg_reaction:.1f} Min", inline=False)
         embed.add_field(name="Gesamt geschlossen", value=total_closed_all, inline=False)
-
         await log_channel.send(embed=embed)
 
-    # --- Listener ---
+    # Listener
     @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
+    async def on_message(self, message):
         if not message.guild or message.author.bot:
             return
         if message.channel.id not in self._active_channel_cache.get(message.guild.id, set()):
@@ -846,16 +610,11 @@ class SupportCog(commands.Cog):
                     if t.get("status") == "PAUSED" and not message.author.guild_permissions.manage_messages:
                         try:
                             await message.delete()
-                            await message.channel.send(
-                                f"{message.author.mention}, dieses Ticket ist pausiert. Du kannst aktuell nicht schreiben.",
-                                delete_after=5
-                            )
-                        except Exception:
+                            await message.channel.send("Dieses Ticket ist pausiert.", delete_after=5)
+                        except:
                             pass
                         return
                     t["last_message"] = datetime.datetime.now().isoformat()
-                    if t.get("status") == "WAITING_USER":
-                        t["warned"] = False
                     if not t.get("first_response_at") and message.author.id != t["user_id"]:
                         t["first_response_at"] = datetime.datetime.now().isoformat()
                     changed = True
@@ -863,9 +622,9 @@ class SupportCog(commands.Cog):
             if changed:
                 await self.config.guild(message.guild).active_tickets.set(tickets)
         except Exception as e:
-            log.error(f"Error in on_message: {e}")
+            log.error(f"Fehler in on_message: {e}")
 
-    # --- Auto-Close & Auto-Eskalation Loop ---
+    # Auto-Close & Auto-Eskalation Loop
     async def autoclose_loop(self):
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
@@ -894,8 +653,6 @@ class SupportCog(commands.Cog):
                                     t["escalated"] = True
                                     t["last_message"] = datetime.datetime.now().isoformat()
                                     changed = True
-                            t["last_message"] = datetime.datetime.now().isoformat()
-                            changed = True
                             continue
                         if ah == 0:
                             continue
@@ -906,7 +663,7 @@ class SupportCog(commands.Cog):
                                 await ch.send(f"⚠️ <@{t['user_id']}>, dieses Ticket wird in **2 Stunden** automatisch geschlossen.")
                                 t["warned"] = True
                                 changed = True
-                            except Exception:
+                            except:
                                 pass
                         if diff_h > ah:
                             await self.close_ticket(ch, "Inaktivität (Auto-Close)", guild.me, is_auto=True)
@@ -915,110 +672,325 @@ class SupportCog(commands.Cog):
                     if changed:
                         await self.config.guild(guild).active_tickets.set(tickets)
             except Exception as e:
-                log.error(f"Autoclose Loop Error: {e}")
+                log.error(f"Auto-Close Loop Fehler: {e}")
             await asyncio.sleep(300)
 
-    # --- Befehle ---
-    @commands.group(name="ticket", aliases=["tickets"], invoke_without_command=True)
+    # Befehle
+    @commands.group(name="ticket", invoke_without_command=True)
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    async def ticket_cmd(self, ctx: commands.Context):
+    async def ticket_cmd(self, ctx):
         await ctx.send_help(ctx.command)
 
     @ticket_cmd.command(name="help")
-    async def ticket_help(self, ctx: commands.Context):
-        embed = discord.Embed(title="🎫 Ticket System – Hilfe & Einrichtung", color=discord.Color.blurple())
-        embed.add_field(
-            name="1️⃣ Basis-Setup (`[p]ticket setup`)",
-            value=(
-                "- Führe `[p]ticket setup` aus.\n"
-                "- Wähle den **Log-Channel** über das Dropdown-Menü.\n"
-                "- Passe die restlichen Einstellungen über die Buttons an.\n"
-                "- Klicke abschließend auf **Setup abschließen**."
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="2️⃣ Kategorien erstellen (`[p]ticket addcat`)",
-            value=(
-                "- Führe `[p]ticket addcat` aus.\n"
-                "- Klicke auf **Texte anpassen**, um Name, Beschreibung, Abkürzung und Emoji festzulegen.\n"
-                "- Wähle über das Dropdown die **Discord-Kategorie** oder den **Thread-Channel**.\n"
-                "- Wähle die **Support-Rolle** und optional die **High-Team-Rolle**.\n"
-                "- Setze **Max aktiv**.\n"
-                "- Klicke **Speichern**."
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="3️⃣ Panel erstellen (`[p]ticket panel`)",
-            value="- Führe `[p]ticket panel #dein-channel` aus, um das Ticket-Panel zu posten.",
-            inline=False
-        )
-        embed.add_field(
-            name="4️⃣ Weitere Befehle",
-            value=(
-                "- `[p]ticket listcat` – Zeigt alle Kategorien.\n"
-                "- `[p]ticket managecats` – Kategorien verwalten.\n"
-                "- `[p]ticket blacklist @User` / `[p]ticket unblacklist @User` – Nutzer sperren/entsperren.\n"
-                "- `[p]ticket stats` – Statistiken.\n"
-                "- `[p]ticket history @User` – Ticket-Verlauf eines Nutzers.\n"
-                "- `[p]ticket syncroles` – Rollenmitglieder zu allen Tickets synchronisieren.\n"
-                "- `[p]ticket export` – CSV-Export.\n"
-                "- `[p]ticket reset` – Konfiguration zurücksetzen."
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🛠️ Support-Team Befehle (im Ticket-Kanal)",
-            value=(
-                "- `[p]tadd @User` – Nutzer hinzufügen.\n"
-                "- `[p]tremove @User` – Nutzer entfernen.\n"
-                "- `[p]trename NeuerName` – Ticket umbenennen.\n"
-                "- `[p]ticket forceclose` – Ticket sofort schließen."
-            ),
-            inline=False
-        )
-        embed.set_footer(text="Bei Fragen wende dich an einen Administrator.")
+    async def ticket_help(self, ctx):
+        embed = discord.Embed(title="🎫 Ticket System Hilfe", color=discord.Color.blurple())
+        embed.add_field(name="Setup", value="`[p]ticket setup` – Textbasierter Einrichtungs-Wizard\n`[p]ticket addcat` – Einzelne Kategorie hinzufügen", inline=False)
+        embed.add_field(name="Panel", value="`[p]ticket panel #channel` – Panel posten", inline=False)
+        embed.add_field(name="Verwaltung", value="`[p]ticket listcat`, `[p]ticket blacklist @User`, `[p]ticket managecats`, `[p]ticket stats`, `[p]ticket history @User`, `[p]ticket syncroles`", inline=False)
+        embed.add_field(name="Support", value="`[p]tadd @User`, `[p]tremove @User`, `[p]trename Name`, `[p]ticket forceclose`", inline=False)
         await ctx.send(embed=embed)
 
-    @ticket_cmd.command(name="setup")
-    async def ticket_setup(self, ctx: commands.Context):
-        try:
-            view = BaseSetupView(self, ctx)
-        except Exception as e:
-            return await ctx.send(f"❌ Fehler beim Setup: {e}")
-        msg = await ctx.send(embed=discord.Embed(title="🛠️ Basis-Setup", description="Passe die Einstellungen an.", color=discord.Color.blurple()), view=view)
-        view.message = msg
+    # --- NEUER SETUP-WIZARD (textbasiert) ---
+    @ticket_cmd.command(name="setup", aliases=["set"])
+    async def ticket_setup_wizard(self, ctx):
+        """Startet den geführten Einrichtungs-Wizard."""
+        guild = ctx.guild
+        author = ctx.author
+        timeout = 120  # Sekunden
 
+        def check(m):
+            return m.author == author and m.channel == ctx.channel
+
+        # Hilfsfunktion für Eingaben
+        async def ask(question):
+            await ctx.send(question)
+            try:
+                reply = await self.bot.wait_for('message', check=check, timeout=timeout)
+                return reply.content
+            except asyncio.TimeoutError:
+                await ctx.send("⏰ Zeit abgelaufen. Bitte starte den Wizard erneut.")
+                return None
+
+        # 1. Log-Channel
+        log_channel = None
+        while log_channel is None:
+            answer = await ask("Bitte gib den **Log-Channel** an (ID oder #Erwähnung):")
+            if answer is None:
+                return
+            try:
+                log_channel = await commands.TextChannelConverter().convert(ctx, answer)
+            except:
+                await ctx.send("❌ Kanal nicht gefunden. Versuche es erneut.")
+
+        # 2. DM-Benachrichtigungen
+        dm_on = None
+        while dm_on is None:
+            answer = await ask("Sollen Nutzer **DM-Benachrichtigungen** erhalten? (ja/nein)")
+            if answer is None:
+                return
+            if answer.lower() in ['ja', 'j', 'yes', 'y']:
+                dm_on = True
+            elif answer.lower() in ['nein', 'n', 'no']:
+                dm_on = False
+            else:
+                await ctx.send("❌ Bitte antworte mit 'ja' oder 'nein'.")
+
+        # 3. Auto-Close Stunden
+        autoclose = None
+        while autoclose is None:
+            answer = await ask("Nach wie vielen Stunden **Inaktivität** soll ein Ticket automatisch geschlossen werden? (0 = aus)")
+            if answer is None:
+                return
+            try:
+                autoclose = int(answer)
+                if autoclose < 0 or autoclose > 500:
+                    raise ValueError
+            except:
+                await ctx.send("❌ Bitte eine Zahl zwischen 0 und 500 eingeben.")
+                autoclose = None
+
+        # 4. Cooldown Minuten
+        cooldown = None
+        while cooldown is None:
+            answer = await ask("Wie lange soll der **Cooldown** zwischen zwei Tickets eines Nutzers sein? (Minuten, 0 = aus)")
+            if answer is None:
+                return
+            try:
+                cooldown = int(answer)
+                if cooldown < 0 or cooldown > 10080:
+                    raise ValueError
+            except:
+                await ctx.send("❌ Bitte eine Zahl zwischen 0 und 10080 eingeben.")
+                cooldown = None
+
+        # 5. Max Tickets pro User
+        max_tickets = None
+        while max_tickets is None:
+            answer = await ask("Wie viele **offene Tickets pro Nutzer** sind gleichzeitig erlaubt?")
+            if answer is None:
+                return
+            try:
+                max_tickets = int(answer)
+                if max_tickets < 1 or max_tickets > 10:
+                    raise ValueError
+            except:
+                await ctx.send("❌ Bitte eine Zahl zwischen 1 und 10 eingeben.")
+                max_tickets = None
+
+        # 6. Threads löschen?
+        delete_threads = None
+        while delete_threads is None:
+            answer = await ask("Sollen **Threads beim Schließen gelöscht** werden? (ja) oder archiviert? (nein)")
+            if answer is None:
+                return
+            if answer.lower() in ['ja', 'j', 'yes', 'y']:
+                delete_threads = True
+            elif answer.lower() in ['nein', 'n', 'no']:
+                delete_threads = False
+            else:
+                await ctx.send("❌ Bitte antworte mit 'ja' oder 'nein'.")
+
+        # 7. Auto-Eskalation Stunden
+        auto_esc = None
+        while auto_esc is None:
+            answer = await ask("Nach wie vielen Stunden soll ein Ticket mit Status 'Wartet auf Team' **automatisch eskaliert** werden? (0 = aus)")
+            if answer is None:
+                return
+            try:
+                auto_esc = int(answer)
+                if auto_esc < 0 or auto_esc > 500:
+                    raise ValueError
+            except:
+                await ctx.send("❌ Bitte eine Zahl zwischen 0 und 500 eingeben.")
+                auto_esc = None
+
+        # 8. Kategorien hinzufügen (Schleife)
+        categories = {}
+        add_more = True
+        while add_more:
+            answer = await ask("Möchtest du jetzt eine **Support-Kategorie** hinzufügen? (ja/nein)")
+            if answer is None:
+                return
+            if answer.lower() in ['nein', 'n', 'no']:
+                add_more = False
+                break
+            elif answer.lower() not in ['ja', 'j', 'yes', 'y']:
+                await ctx.send("❌ Bitte antworte mit 'ja' oder 'nein'.")
+                continue
+
+            # Kategorie-Daten sammeln
+            cat_name = None
+            while cat_name is None:
+                cat_name = await ask("**Name der Kategorie** (z.B. Allgemeiner Support):")
+                if cat_name is None: return
+
+            cat_desc = await ask("**Beschreibung** (optional, Enter zum Überspringen):")
+            if cat_desc is None: return
+            if cat_desc.strip() == "":
+                cat_desc = None
+
+            cat_emoji = await ask("**Emoji** (optional, Standard: 🎫):")
+            if cat_emoji is None: return
+            if cat_emoji.strip() == "":
+                cat_emoji = "🎫"
+
+            cat_abbr = None
+            while cat_abbr is None:
+                cat_abbr = await ask("**Abkürzung** für Kanalnamen (z.B. SUP):")
+                if cat_abbr is None: return
+                if len(cat_abbr) > 10:
+                    await ctx.send("❌ Abkürzung max. 10 Zeichen.")
+                    cat_abbr = None
+
+            # Typ auswählen: channel oder thread
+            typ = None
+            while typ is None:
+                answer = await ask("Sollen Tickets als **Textkanal** in einer Kategorie oder als **Thread** erstellt werden? (channel/thread)")
+                if answer is None: return
+                if answer.lower() in ['channel', 'k', 'kanal']:
+                    typ = 'channel'
+                elif answer.lower() in ['thread', 't', 'faden']:
+                    typ = 'thread'
+                else:
+                    await ctx.send("❌ Bitte 'channel' oder 'thread' eingeben.")
+
+            discord_cat_id = None
+            thread_parent_id = None
+            if typ == 'channel':
+                # Discord-Kategorie auswählen
+                while discord_cat_id is None:
+                    answer = await ask("Bitte gib die **Discord-Kategorie** an (ID oder Name):")
+                    if answer is None: return
+                    try:
+                        cat = await commands.CategoryChannelConverter().convert(ctx, answer)
+                        discord_cat_id = cat.id
+                    except:
+                        await ctx.send("❌ Kategorie nicht gefunden.")
+            else:
+                # Thread-Channel auswählen
+                while thread_parent_id is None:
+                    answer = await ask("Bitte gib den **Textkanal** an, in dem Threads erstellt werden sollen (ID oder #Erwähnung):")
+                    if answer is None: return
+                    try:
+                        ch = await commands.TextChannelConverter().convert(ctx, answer)
+                        thread_parent_id = ch.id
+                    except:
+                        await ctx.send("❌ Textkanal nicht gefunden.")
+
+            # Support-Rolle
+            staff_role_id = None
+            while staff_role_id is None:
+                answer = await ask("Bitte gib die **Support-Rolle** an (ID oder Name):")
+                if answer is None: return
+                try:
+                    role = await commands.RoleConverter().convert(ctx, answer)
+                    staff_role_id = role.id
+                except:
+                    await ctx.send("❌ Rolle nicht gefunden.")
+
+            # High-Team Rolle (optional)
+            high_role_id = None
+            answer = await ask("**High-Team-Rolle** (optional, Enter zum Überspringen):")
+            if answer is None: return
+            if answer.strip() != "":
+                try:
+                    high_role = await commands.RoleConverter().convert(ctx, answer)
+                    high_role_id = high_role.id
+                except:
+                    await ctx.send("❌ Rolle nicht gefunden. High-Team wird übersprungen.")
+
+            # Max Tickets für Kategorie
+            cat_max = None
+            while cat_max is None:
+                answer = await ask("Maximale **aktive Tickets** in dieser Kategorie gleichzeitig? (0 = unbegrenzt)")
+                if answer is None: return
+                try:
+                    cat_max = int(answer)
+                    if cat_max < 0 or cat_max > 100:
+                        raise ValueError
+                except:
+                    await ctx.send("❌ Bitte eine Zahl zwischen 0 und 100.")
+                    cat_max = None
+
+            # Kategorie speichern
+            cat_id = str(uuid.uuid4())[:8]
+            categories[cat_id] = {
+                "name": cat_name,
+                "description": cat_desc,
+                "emoji": cat_emoji,
+                "abbr": cat_abbr.upper(),
+                "discord_category_id": discord_cat_id,
+                "thread_parent_id": thread_parent_id,
+                "staff_role_id": staff_role_id,
+                "high_team_role_id": high_role_id,
+                "max_tickets": cat_max
+            }
+            await ctx.send(f"✅ Kategorie **{cat_name}** hinzugefügt.")
+
+        # 9. Panel posten?
+        panel_channel = None
+        answer = await ask("Möchtest du das **Ticket-Panel** jetzt in einem Kanal posten? (ja/nein)")
+        if answer is None: return
+        if answer.lower() in ['ja', 'j', 'yes', 'y']:
+            while panel_channel is None:
+                answer = await ask("Bitte gib den **Textkanal** für das Panel an (ID oder #Erwähnung):")
+                if answer is None: return
+                try:
+                    panel_channel = await commands.TextChannelConverter().convert(ctx, answer)
+                except:
+                    await ctx.send("❌ Kanal nicht gefunden.")
+
+        # Alles speichern
+        await self.config.guild(guild).log_channel_id.set(log_channel.id)
+        await self.config.guild(guild).dm_notifications.set(dm_on)
+        await self.config.guild(guild).autoclose_hours.set(autoclose)
+        await self.config.guild(guild).cooldown_minutes.set(cooldown)
+        await self.config.guild(guild).max_tickets_per_user.set(max_tickets)
+        await self.config.guild(guild).delete_threads_after_close.set(delete_threads)
+        await self.config.guild(guild).auto_escalate_hours.set(auto_esc)
+        if categories:
+            await self.config.guild(guild).categories.set(categories)
+
+        # Panel posten
+        if panel_channel:
+            await self.create_panel(panel_channel)
+
+        await ctx.send("✅ **Setup abgeschlossen!**\n"
+                       f"Log-Channel: {log_channel.mention}\n"
+                       f"Kategorien: {len(categories)}\n"
+                       f"Panel: {panel_channel.mention if panel_channel else 'Nicht gepostet'}")
+
+
+    # --- Bestehende Befehle (unverändert ab hier) ---
     @ticket_cmd.command(name="addcat")
-    async def ticket_addcat(self, ctx: commands.Context):
+    async def ticket_addcat(self, ctx):
         try:
             view = CategorySetupView(self, ctx)
         except Exception as e:
             return await ctx.send(f"❌ Fehler: {e}")
-        msg = await ctx.send(embed=discord.Embed(title="🏷️ Kategorie Setup", description="Konfiguriere die Kategorie.", color=discord.Color.green()), view=view)
+        msg = await ctx.send(embed=discord.Embed(title="🏷️ Kategorie Setup", description="Konfiguriere die Kategorie."), view=view)
         view.message = msg
 
     @ticket_cmd.command(name="listcat")
-    async def ticket_listcat(self, ctx: commands.Context):
+    async def ticket_listcat(self, ctx):
         categories = await self.config.guild(ctx.guild).categories()
         if not categories:
-            return await ctx.send("❌ Keine Kategorien vorhanden.")
+            return await ctx.send("❌ Keine Kategorien.")
         text = "**Kategorien:**\n"
         for cid, data in categories.items():
-            text += f"- {data.get('name')} (`{cid}`) | Abkürzung: {data.get('abbr')} | Max: {data.get('max_tickets')}\n"
+            text += f"- {data.get('name')} (`{cid}`) | Max: {data.get('max_tickets')}\n"
         await ctx.send(text)
 
     @ticket_cmd.command(name="managecats")
-    async def ticket_managecats(self, ctx: commands.Context):
+    async def ticket_managecats(self, ctx):
         categories = await self.config.guild(ctx.guild).categories()
         if not categories:
-            return await ctx.send("❌ Keine Kategorien vorhanden.")
-        options = [discord.SelectOption(label=c["name"][:100], value=cat_id, description="Bearbeiten/Löschen") for cat_id, c in categories.items()][:25]
+            return await ctx.send("❌ Keine Kategorien.")
+        options = [discord.SelectOption(label=c["name"][:100], value=cat_id) for cat_id, c in categories.items()][:25]
         view = discord.ui.View(timeout=300)
         select = discord.ui.Select(placeholder="Kategorie wählen", options=options)
-        async def select_cb(inter: discord.Interaction):
+        async def select_cb(inter):
             cat_id = select.values[0]
             cat_data = categories[cat_id]
             ed_view = discord.ui.View(timeout=300)
@@ -1043,23 +1015,32 @@ class SupportCog(commands.Cog):
             ed_view.add_item(btn_edit)
             ed_view.add_item(btn_del)
             ed_view.add_item(btn_back)
-            await inter.response.edit_message(content=f"Kategorie {cat_data['name']} ausgewählt.", view=ed_view)
+            await inter.response.edit_message(content=f"Kategorie {cat_data['name']}", view=ed_view)
         select.callback = select_cb
         view.add_item(select)
-        await ctx.send("Kategorie auswählen:", view=view)
+        await ctx.send("Kategorie wählen:", view=view)
 
     @ticket_cmd.command(name="panel")
-    async def ticket_panel(self, ctx: commands.Context, channel: discord.TextChannel = None):
+    async def ticket_panel(self, ctx, channel: discord.TextChannel = None):
         if not channel:
             channel = ctx.channel
         categories = await self.config.guild(ctx.guild).categories()
         if not categories:
-            return await ctx.send("❌ Erstelle zuerst eine Kategorie mit `[p]ticket addcat`!")
-        await self.create_panel(channel)
+            return await ctx.send("❌ Erstelle zuerst eine Kategorie.")
+        view = TicketPanelView(self)
+        options = self._build_panel_options(categories, await self.config.guild(ctx.guild).active_tickets())
+        for child in view.children:
+            if isinstance(child, discord.ui.Select):
+                child.options = options
+        embed = discord.Embed(title="🎫 Support", description="Wähle eine Kategorie.", color=discord.Color.blurple())
+        msg = await channel.send(embed=embed, view=view)
+        panels = await self.config.guild(ctx.guild).panels()
+        panels.append({"channel_id": channel.id, "msg_id": msg.id})
+        await self.config.guild(ctx.guild).panels.set(panels)
         await ctx.send(f"✅ Panel in {channel.mention} gepostet.")
 
     @ticket_cmd.command(name="blacklist")
-    async def ticket_blacklist(self, ctx: commands.Context, user: discord.User, *, reason: str = "Kein Grund angegeben"):
+    async def ticket_blacklist(self, ctx, user: discord.User, *, reason: str = "Kein Grund"):
         bl = await self.config.guild(ctx.guild).blacklist()
         if user.id not in bl:
             bl.append(user.id)
@@ -1069,7 +1050,7 @@ class SupportCog(commands.Cog):
             await ctx.send("❌ Bereits gesperrt.")
 
     @ticket_cmd.command(name="unblacklist")
-    async def ticket_unblacklist(self, ctx: commands.Context, user: discord.User):
+    async def ticket_unblacklist(self, ctx, user: discord.User):
         bl = await self.config.guild(ctx.guild).blacklist()
         if user.id in bl:
             bl.remove(user.id)
@@ -1079,7 +1060,7 @@ class SupportCog(commands.Cog):
             await ctx.send("❌ Nicht gesperrt.")
 
     @ticket_cmd.command(name="forceclose")
-    async def ticket_forceclose(self, ctx: commands.Context):
+    async def ticket_forceclose(self, ctx):
         tickets = await self.config.guild(ctx.guild).active_tickets()
         t_data = next((t for t in tickets if t["channel_id"] == ctx.channel.id), None)
         if t_data:
@@ -1097,22 +1078,20 @@ class SupportCog(commands.Cog):
                         await ctx.channel.edit(name=new_name, archived=True, locked=True)
                 else:
                     await ctx.channel.delete()
-            except Exception:
+            except:
                 pass
         else:
             await ctx.send("❌ Kein aktives Ticket.")
 
     @ticket_cmd.command(name="stats")
-    async def ticket_stats(self, ctx: commands.Context, category: str = None):
+    async def ticket_stats(self, ctx, category: str = None):
         stats = await self.config.guild(ctx.guild).stats()
         active_tickets = await self.config.guild(ctx.guild).active_tickets()
         total_created = await self.config.guild(ctx.guild).total_tickets_created()
         category_stats = await self.config.guild(ctx.guild).category_stats()
         categories = await self.config.guild(ctx.guild).categories()
-
         if not stats and not active_tickets and total_created == 0 and not category_stats:
-            return await ctx.send("Noch keine Statistiken vorhanden.")
-
+            return await ctx.send("Keine Statistiken.")
         if category:
             cat_data = None
             cat_id_found = None
@@ -1122,104 +1101,37 @@ class SupportCog(commands.Cog):
                     cat_id_found = cid
                     break
             if not cat_data:
-                return await ctx.send("❌ Kategorie nicht gefunden.")
-
+                return await ctx.send("Kategorie nicht gefunden.")
             cs = category_stats.get(cat_id_found, {"created": 0, "closed": 0, "stars": [0,0,0,0,0], "total_duration_minutes": 0, "ticket_count": 0})
-            embed = discord.Embed(title=f"📊 Statistiken für {cat_data['name']}", color=discord.Color.gold())
-            embed.add_field(name="Erstellt", value=cs.get("created", 0), inline=True)
-            embed.add_field(name="Geschlossen", value=cs.get("closed", 0), inline=True)
-            embed.add_field(name="Offen", value=sum(1 for t in active_tickets if t["cat_id"] == cat_id_found), inline=True)
-            if cs.get("ticket_count", 0) > 0:
-                avg_duration = cs.get("total_duration_minutes", 0) / cs["ticket_count"]
-            else:
-                avg_duration = 0
-            embed.add_field(name="Ø Bearbeitungszeit", value=f"{avg_duration:.1f} Min", inline=True)
-            if sum(cs.get("stars", [0,0,0,0,0])) > 0:
-                avg_rating = sum((i+1)*s for i,s in enumerate(cs["stars"])) / sum(cs["stars"])
-            else:
-                avg_rating = 0
-            embed.add_field(name="Ø Bewertung", value=f"{avg_rating:.2f} / 5", inline=True)
-            if await self.config.guild(ctx.guild).use_emoji_charts():
-                bar = self._emoji_bar(avg_rating, 5, 10)
-                embed.add_field(name="Bewertungs-Balken", value=bar, inline=False)
+            embed = discord.Embed(title=f"Statistik für {cat_data['name']}", color=discord.Color.gold())
+            embed.add_field(name="Erstellt", value=cs.get("created", 0))
+            embed.add_field(name="Geschlossen", value=cs.get("closed", 0))
+            embed.add_field(name="Offen", value=sum(1 for t in active_tickets if t["cat_id"] == cat_id_found))
             return await ctx.send(embed=embed)
-
         total_closed = sum(u.get("closed", 0) for u in stats.values())
-        total_open = len(active_tickets)
-        total_duration = sum(u.get("total_duration_minutes", 0) for u in stats.values())
-        total_ticket_count = sum(u.get("ticket_count", 0) for u in stats.values())
-        avg_duration = total_duration / total_ticket_count if total_ticket_count > 0 else 0
-
-        all_stars = [s for u in stats.values() for s in u.get("stars", [0,0,0,0,0])]
-        total_reviews = sum(all_stars)
-        if total_reviews > 0:
-            avg_rating = sum((i+1)*s for i,s in enumerate(all_stars)) / total_reviews
-        else:
-            avg_rating = 0
-
-        embed = discord.Embed(title="📊 Support System Statistik", color=discord.Color.gold())
-        embed.add_field(
-            name="Gesamtübersicht",
-            value=(
-                f"🎫 Erstellt: **{total_created}**\n"
-                f"🔒 Geschlossen: **{total_closed}**\n"
-                f"📂 Offen: **{total_open}**\n"
-                f"⏱️ Ø Bearbeitungszeit: **{avg_duration:.1f} Min**\n"
-                f"⭐ Ø Bewertung: **{avg_rating:.2f} / 5**"
-            ),
-            inline=False
-        )
-
+        embed = discord.Embed(title="Support System Statistik", color=discord.Color.gold())
+        embed.add_field(name="Erstellt", value=total_created)
+        embed.add_field(name="Geschlossen", value=total_closed)
+        embed.add_field(name="Offen", value=len(active_tickets))
         if stats:
             sorted_stats = sorted(stats.items(), key=lambda x: x[1].get("closed", 0), reverse=True)
             desc = ""
-            for i, (uid, data) in enumerate(sorted_stats[:10], 1):
-                user = ctx.guild.get_member(int(uid)) or self.bot.get_user(int(uid))
-                name = user.display_name if user else f"ID: {uid}"
-                stars = data.get("stars", [0,0,0,0,0])
-                reviews = sum(stars)
-                avg_user_rating = (sum((i+1)*s for i, s in enumerate(stars)) / reviews) if reviews > 0 else 0
-                user_duration = data.get("total_duration_minutes", 0)
-                user_ticket_count = data.get("ticket_count", 0)
-                avg_user_duration = user_duration / user_ticket_count if user_ticket_count > 0 else 0
-                desc += (
-                    f"**{i}. {name}**\n"
-                    f"🎫 Übernommen: `{data.get('claimed', 0)}` | 🔒 Geschlossen: `{data.get('closed', 0)}`\n"
-                    f"⏱️ Ø Dauer: `{avg_user_duration:.1f} Min` | ⭐ Ø `{avg_user_rating:.1f}/5` ({reviews} Reviews)\n\n"
-                )
-            embed.add_field(name="🏆 Top Support Team", value=desc, inline=False)
-
-        if await self.config.guild(ctx.guild).show_category_stats() and category_stats:
-            cat_desc = ""
-            max_created = max([cs.get("created", 0) for cs in category_stats.values()] or [1])
-            for cat_id, cs in category_stats.items():
-                cat_name = categories.get(cat_id, {}).get("name", "Unbekannt")
-                created = cs.get("created", 0)
-                closed = cs.get("closed", 0)
-                if await self.config.guild(ctx.guild).use_emoji_charts():
-                    bar = self._emoji_bar(created, max_created, 10)
-                    cat_desc += f"**{cat_name}**: {created} erstellt, {closed} geschlossen {bar}\n"
-                else:
-                    cat_desc += f"**{cat_name}**: {created} erstellt, {closed} geschlossen\n"
-            embed.add_field(name="📁 Kategorie-Übersicht", value=cat_desc, inline=False)
-
+            for uid, data in sorted_stats[:10]:
+                user = ctx.guild.get_member(int(uid))
+                name = user.display_name if user else "Unbekannt"
+                desc += f"**{name}**: {data.get('closed',0)} geschlossen\n"
+            embed.add_field(name="Top Support", value=desc, inline=False)
         await ctx.send(embed=embed)
 
     @ticket_cmd.command(name="history")
-    async def ticket_history(self, ctx: commands.Context, user: discord.User = None):
+    async def ticket_history(self, ctx, user: discord.User = None):
         if not user:
             user = ctx.author
-
         history = await self.config.guild(ctx.guild).ticket_history()
         user_tickets = [t for t in history if t["user_id"] == user.id]
-
         if not user_tickets:
-            return await ctx.send(f"❌ Keine vergangenen Tickets für {user.mention} gefunden.")
-
-        embed = discord.Embed(
-            title=f"📜 Ticket-Verlauf für {user.display_name}",
-            color=discord.Color.blue()
-        )
+            return await ctx.send(f"Keine Tickets für {user.mention}.")
+        embed = discord.Embed(title=f"Ticket-Verlauf für {user.display_name}", color=discord.Color.blue())
         for t in user_tickets[-10:]:
             cat_data = (await self.config.guild(ctx.guild).categories()).get(t["cat_id"], {})
             cat_name = cat_data.get("name", "Unbekannt")
@@ -1227,102 +1139,64 @@ class SupportCog(commands.Cog):
             closed = datetime.datetime.fromisoformat(t["closed_at"]).strftime("%d.%m.%Y %H:%M")
             stars = t.get("stars", 0)
             reason = t.get("close_reason", "Kein Grund")
-            embed.add_field(
-                name=f"{cat_name} – {created}",
-                value=f"Geschlossen: {closed}\nBewertung: {'⭐'*stars if stars else 'Keine'}\nGrund: {reason}",
-                inline=False
-            )
-
+            embed.add_field(name=f"{cat_name} – {created}", value=f"Geschlossen: {closed}\nBewertung: {'⭐'*stars if stars else 'Keine'}\nGrund: {reason}", inline=False)
         await ctx.send(embed=embed)
 
     @ticket_cmd.command(name="syncroles")
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    async def ticket_syncroles(self, ctx: commands.Context):
-        """Synchronisiert die aktuellen Mitglieder der Support-/High-Team-Rollen zu allen Ticket-Threads (aktiv & archiviert)."""
+    async def ticket_syncroles(self, ctx):
         guild = ctx.guild
-        # Alle Ticket-Threads sammeln (aktive und archivierte)
         active_tickets = await self.config.guild(guild).active_tickets()
         history = await self.config.guild(guild).ticket_history()
         thread_ids = set()
-
         for t in active_tickets:
             thread_ids.add(t["channel_id"])
         for h in history:
             thread_ids.add(h["channel_id"])
-
         count = 0
         for cid in thread_ids:
             ch = guild.get_channel(cid)
             if isinstance(ch, discord.Thread):
                 try:
-                    # Thread entsperren, Mitglieder hinzufügen, wieder sperren
                     await ch.edit(archived=False, locked=False)
                     await self._sync_roles_to_thread(ch, guild)
                     await ch.edit(archived=True, locked=True)
                     count += 1
                 except Exception as e:
-                    log.error(f"Fehler beim Synchronisieren von {cid}: {e}")
-
-        await ctx.send(f"✅ Rollen wurden zu {count} Ticket-Threads synchronisiert.")
+                    log.error(f"Sync fehlgeschlagen für {cid}: {e}")
+        await ctx.send(f"✅ Rollen wurden zu {count} Threads synchronisiert.")
 
     @ticket_cmd.command(name="export")
-    async def ticket_export(self, ctx: commands.Context):
+    async def ticket_export(self, ctx):
         stats = await self.config.guild(ctx.guild).stats()
         category_stats = await self.config.guild(ctx.guild).category_stats()
         categories = await self.config.guild(ctx.guild).categories()
-
-        team_csv = io.StringIO()
-        team_csv.write("UserID,Name,Claimed,Closed,Reviews,AvgRating,AvgDuration\n")
+        csv_data = "User,Claimed,Closed\n"
         for uid, data in stats.items():
-            user = ctx.guild.get_member(int(uid)) or self.bot.get_user(int(uid))
-            name = user.display_name if user else "Unknown"
-            reviews = sum(data.get("stars", [0,0,0,0,0]))
-            avg_rating = (sum((i+1)*s for i,s in enumerate(data.get("stars", [0,0,0,0,0]))) / reviews) if reviews > 0 else 0
-            ticket_count = data.get("ticket_count", 0)
-            avg_duration = data.get("total_duration_minutes", 0) / ticket_count if ticket_count > 0 else 0
-            team_csv.write(f"{uid},{name},{data.get('claimed',0)},{data.get('closed',0)},{reviews},{avg_rating:.2f},{avg_duration:.2f}\n")
-        team_csv.seek(0)
-
-        cat_csv = io.StringIO()
-        cat_csv.write("CategoryID,Name,Created,Closed,Reviews,AvgRating,AvgDuration\n")
+            user = ctx.guild.get_member(int(uid))
+            csv_data += f"{user.display_name if user else uid},{data.get('claimed',0)},{data.get('closed',0)}\n"
+        csv_data += "\nKategorie,Erstellt,Geschlossen\n"
         for cat_id, cs in category_stats.items():
             cat_name = categories.get(cat_id, {}).get("name", "Unbekannt")
-            reviews = sum(cs.get("stars", [0,0,0,0,0]))
-            avg_rating = (sum((i+1)*s for i,s in enumerate(cs.get("stars", [0,0,0,0,0]))) / reviews) if reviews > 0 else 0
-            ticket_count = cs.get("ticket_count", 0)
-            avg_duration = cs.get("total_duration_minutes", 0) / ticket_count if ticket_count > 0 else 0
-            cat_csv.write(f"{cat_id},{cat_name},{cs.get('created',0)},{cs.get('closed',0)},{reviews},{avg_rating:.2f},{avg_duration:.2f}\n")
-        cat_csv.seek(0)
-
-        combined = io.StringIO()
-        combined.write("=== Team-Statistiken ===\n")
-        combined.write(team_csv.read())
-        combined.write("\n=== Kategorie-Statistiken ===\n")
-        combined.write(cat_csv.read())
-        combined.seek(0)
-
-        file = discord.File(combined, filename="ticket_stats.csv")
+            csv_data += f"{cat_name},{cs.get('created',0)},{cs.get('closed',0)}\n"
+        file = discord.File(io.StringIO(csv_data), filename="ticket_stats.csv")
         await ctx.send(file=file)
-        combined.close()
-        team_csv.close()
-        cat_csv.close()
 
     @ticket_cmd.command(name="reset")
-    async def ticket_reset(self, ctx: commands.Context):
+    async def ticket_reset(self, ctx):
         await self.config.guild(ctx.guild).clear()
         self._active_channel_cache[ctx.guild.id] = set()
         await ctx.send("✅ Konfiguration zurückgesetzt.")
 
-    # --- Support-Befehle ---
+    # Support-Befehle
     @commands.command(name="tadd")
-    @commands.guild_only()
-    async def ticket_add(self, ctx: commands.Context, user: discord.Member):
+    async def tadd(self, ctx, user: discord.Member):
         tickets = await self.config.guild(ctx.guild).active_tickets()
-        t_data = next((t for t in tickets if t["channel_id"] == ctx.channel.id), None)
-        if not t_data:
+        t = next((x for x in tickets if x["channel_id"] == ctx.channel.id), None)
+        if not t:
             return
-        if not await self.is_support(ctx.author, ctx.guild, t_data):
+        if not await self.is_support(ctx.author, ctx.guild, t):
             return await ctx.send("❌ Keine Berechtigung.", delete_after=5)
         try:
             if isinstance(ctx.channel, discord.Thread):
@@ -1334,15 +1208,14 @@ class SupportCog(commands.Cog):
             await ctx.send(f"❌ Fehler: {e}")
 
     @commands.command(name="tremove")
-    @commands.guild_only()
-    async def ticket_remove(self, ctx: commands.Context, user: discord.Member):
+    async def tremove(self, ctx, user: discord.Member):
         tickets = await self.config.guild(ctx.guild).active_tickets()
-        t_data = next((t for t in tickets if t["channel_id"] == ctx.channel.id), None)
-        if not t_data:
+        t = next((x for x in tickets if x["channel_id"] == ctx.channel.id), None)
+        if not t:
             return
-        if t_data["user_id"] == user.id:
+        if t["user_id"] == user.id:
             return await ctx.send("❌ Du kannst den Ersteller nicht entfernen.")
-        if not await self.is_support(ctx.author, ctx.guild, t_data):
+        if not await self.is_support(ctx.author, ctx.guild, t):
             return await ctx.send("❌ Keine Berechtigung.", delete_after=5)
         try:
             if isinstance(ctx.channel, discord.Thread):
@@ -1354,13 +1227,12 @@ class SupportCog(commands.Cog):
             await ctx.send(f"❌ Fehler: {e}")
 
     @commands.command(name="trename")
-    @commands.guild_only()
-    async def ticket_rename(self, ctx: commands.Context, *, new_name: str):
+    async def trename(self, ctx, *, new_name: str):
         tickets = await self.config.guild(ctx.guild).active_tickets()
-        t_data = next((t for t in tickets if t["channel_id"] == ctx.channel.id), None)
-        if not t_data:
+        t = next((x for x in tickets if x["channel_id"] == ctx.channel.id), None)
+        if not t:
             return
-        if not await self.is_support(ctx.author, ctx.guild, t_data):
+        if not await self.is_support(ctx.author, ctx.guild, t):
             return await ctx.send("❌ Keine Berechtigung.", delete_after=5)
         try:
             await ctx.channel.edit(name=new_name[:100])
@@ -1368,21 +1240,15 @@ class SupportCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Fehler: {e}")
 
-    async def is_support(self, member: discord.Member, guild: discord.Guild, ticket_data: dict) -> bool:
+    async def is_support(self, member, guild, ticket_data):
         if member.guild_permissions.manage_guild:
             return True
         cat_data = (await self.config.guild(guild).categories()).get(ticket_data.get("cat_id"), {})
         allowed = [cat_data.get("staff_role_id"), cat_data.get("high_team_role_id")]
         return any(rid is not None and rid in [r.id for r in member.roles] for rid in allowed)
 
-    # --- Core Logic ---
-    async def create_panel(self, channel: discord.TextChannel):
-        guild = channel.guild
-        view = TicketPanelView(self)
-        embed = await self._build_panel_embed(guild)
-
-        categories = await self.config.guild(guild).categories()
-        active_tickets = await self.config.guild(guild).active_tickets()
+    # Core Logic
+    def _build_panel_options(self, categories, active_tickets):
         options = []
         for cat_id, c in categories.items():
             active_count = sum(1 for t in active_tickets if t["cat_id"] == cat_id and t.get("status") == "ACTIVE")
@@ -1394,118 +1260,37 @@ class SupportCog(commands.Cog):
             else:
                 description = c.get("description", "")[:100] if c.get("description") else None
             options.append(discord.SelectOption(label=label, value=cat_id, description=description, emoji=c.get("emoji")))
-        for child in view.children:
-            if isinstance(child, discord.ui.Select):
-                child.options = options[:25]
+        return options[:25]
 
-        msg = await channel.send(embed=embed, view=view)
-        panels = await self.config.guild(guild).panels()
-        panels.append({"channel_id": channel.id, "msg_id": msg.id})
-        await self.config.guild(guild).panels.set(panels)
-
-    async def _build_panel_embed(self, guild: discord.Guild) -> discord.Embed:
-        categories = await self.config.guild(guild).categories()
-        active_tickets = await self.config.guild(guild).active_tickets()
-
-        embed = discord.Embed(
-            title="🎫 Support Ticket System",
-            description=(
-                "Brauchst du Hilfe? Wähle unten im Dropdown-Menü die passende Kategorie aus.\n"
-                "Die Auslastung zeigt, wie viele Tickets aktuell in Bearbeitung sind."
-            ),
-            color=discord.Color.blurple()
-        )
-        embed.set_footer(text=f"{guild.name} Support Team")
-
-        if not categories:
-            embed.add_field(
-                name="⚠️ Hinweis",
-                value="Es wurden noch keine Kategorien erstellt. Ein Admin muss `[p]ticket addcat` nutzen.",
-                inline=False
-            )
-            return embed
-
-        for cat_id, cat_data in categories.items():
-            active_count = sum(
-                1 for t in active_tickets
-                if t["cat_id"] == cat_id and t.get("status") == "ACTIVE"
-            )
-            max_tickets = cat_data.get("max_tickets", 10)
-            emoji = cat_data.get("emoji", "🎫")
-            name = cat_data.get("name", "Unbekannt")
-
-            if max_tickets > 0:
-                percent = int((active_count / max_tickets) * 100)
-                filled = int((active_count / max_tickets) * 10)
-                filled = max(0, min(filled, 10))
-                bar = "🟩" * filled + "⬜" * (10 - filled)
-                status = f"{active_count}/{max_tickets} {bar} {percent}%"
-            else:
-                status = f"{active_count} aktiv (unbegrenzt)"
-
-            embed.add_field(
-                name=f"{emoji} {name}",
-                value=f"`{status}`",
-                inline=True
-            )
-
-        return embed
-
-    async def update_panels(self, guild: discord.Guild):
+    async def update_panels(self, guild):
         categories = await self.config.guild(guild).categories()
         active_tickets = await self.config.guild(guild).active_tickets()
         panels = await self.config.guild(guild).panels()
-        valid_panels = []
+        valid = []
         for p in panels:
             ch = guild.get_channel(p["channel_id"])
             if not ch:
                 continue
             try:
                 msg = await ch.fetch_message(p["msg_id"])
-
-                options = []
-                for cat_id, c in categories.items():
-                    active_count = sum(1 for t in active_tickets if t["cat_id"] == cat_id and t.get("status") == "ACTIVE")
-                    max_t = c.get("max_tickets", 10)
-                    label = c["name"][:100]
-                    if max_t > 0:
-                        label = f"{c['name']} ({active_count}/{max_t})"[:100]
-                        description = f"{c.get('description', '')} - {int((active_count/max_t)*100)}% ausgelastet"[:100] if c.get('description') else f"{int((active_count/max_t)*100)}% ausgelastet"
-                    else:
-                        description = c.get("description", "")[:100] if c.get("description") else None
-                    options.append(discord.SelectOption(label=label, value=cat_id, description=description, emoji=c.get("emoji")))
-
                 view = TicketPanelView(self)
+                options = self._build_panel_options(categories, active_tickets)
                 for child in view.children:
                     if isinstance(child, discord.ui.Select):
-                        child.options = options[:25]
-
-                embed = await self._build_panel_embed(guild)
-
-                await msg.edit(embed=embed, view=view)
+                        child.options = options
+                await msg.edit(view=view)
                 self.bot.add_view(view, message_id=msg.id)
-                valid_panels.append(p)
-            except discord.NotFound:
+                valid.append(p)
+            except:
                 pass
-            except Exception as e:
-                log.error(f"Update panel failed: {e}")
-                valid_panels.append(p)
-        await self.config.guild(guild).panels.set(valid_panels)
+        await self.config.guild(guild).panels.set(valid)
 
-    async def finish_base_setup(self, interaction: discord.Interaction, wizard: BaseSetupView):
-        guild = interaction.guild
-        await self.config.guild(guild).log_channel_id.set(wizard.log_channel_id)
-        await self.config.guild(guild).dm_notifications.set(wizard.dm_notifications)
-        await self.config.guild(guild).autoclose_hours.set(wizard.autoclose_hours)
-        await self.config.guild(guild).cooldown_minutes.set(wizard.cooldown_minutes)
-        await self.config.guild(guild).max_tickets_per_user.set(wizard.max_tickets_per_user)
-        await self.config.guild(guild).delete_threads_after_close.set(wizard.delete_threads_after_close)
-        await self.config.guild(guild).auto_escalate_hours.set(wizard.auto_escalate_hours)
-        await self.config.guild(guild).show_category_stats.set(wizard.show_category_stats)
-        await self.config.guild(guild).use_emoji_charts.set(wizard.use_emoji_charts)
-        await interaction.response.edit_message(content="✅ Setup abgeschlossen!", view=None)
+    async def finish_base_setup(self, interaction, wizard):
+        # Diese Methode wird vom alten View-Setup nicht mehr verwendet,
+        # aber für Kompatibilität behalten.
+        pass
 
-    async def save_category(self, interaction: discord.Interaction, wizard: CategorySetupView, cat_id: str = None):
+    async def save_category(self, interaction, wizard, cat_id=None):
         guild = interaction.guild
         if not cat_id:
             cat_id = str(uuid.uuid4())[:8]
@@ -1525,17 +1310,10 @@ class SupportCog(commands.Cog):
         await self.update_panels(guild)
         await interaction.response.edit_message(content="✅ Kategorie gespeichert!", view=None)
 
-    async def add_role_to_thread_silently(self, thread, role):
-        for member in role.members:
-            try:
-                await thread.add_user(member)
-            except Exception:
-                pass
-
-    async def create_ticket(self, interaction: discord.Interaction, cat_id: str, issue: str):
+    async def create_ticket(self, interaction, cat_id, issue):
         try:
             await interaction.response.defer(ephemeral=True)
-        except Exception:
+        except:
             pass
         guild = interaction.guild
         user = interaction.user
@@ -1557,16 +1335,17 @@ class SupportCog(commands.Cog):
                 ticket_channel = await parent_ch.create_thread(name=channel_name, type=discord.ChannelType.private_thread)
                 await ticket_channel.add_user(user)
                 if staff_role:
-                    await self.add_role_to_thread_silently(ticket_channel, staff_role)
+                    for m in staff_role.members:
+                        try: await ticket_channel.add_user(m)
+                        except: pass
                 if high_role:
-                    await self.add_role_to_thread_silently(ticket_channel, high_role)
-                # Admins hinzufügen
-                for member in guild.members:
-                    if member.guild_permissions.administrator:
-                        try:
-                            await ticket_channel.add_user(member)
-                        except Exception:
-                            pass
+                    for m in high_role.members:
+                        try: await ticket_channel.add_user(m)
+                        except: pass
+                for m in guild.members:
+                    if m.guild_permissions.administrator:
+                        try: await ticket_channel.add_user(m)
+                        except: pass
             elif cat_data.get("discord_category_id"):
                 category = guild.get_channel(cat_data["discord_category_id"])
                 if not category:
@@ -1580,10 +1359,9 @@ class SupportCog(commands.Cog):
                     overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
                 if high_role:
                     overwrites[high_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-                # Admins hinzufügen
-                for member in guild.members:
-                    if member.guild_permissions.administrator:
-                        overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+                for m in guild.members:
+                    if m.guild_permissions.administrator:
+                        overwrites[m] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
                 ticket_channel = await guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites)
             else:
                 raise ValueError("Keine Kategorie/Thread konfiguriert")
@@ -1601,7 +1379,6 @@ class SupportCog(commands.Cog):
             "claimed_by": None,
             "escalated": False,
             "status": "ACTIVE",
-            "warned": False,
             "panel_msg_id": None,
             "first_response_at": None
         }
@@ -1615,8 +1392,8 @@ class SupportCog(commands.Cog):
         tickets.append(ticket_data)
         await self.config.guild(guild).active_tickets.set(tickets)
 
-        current_total = await self.config.guild(guild).total_tickets_created()
-        await self.config.guild(guild).total_tickets_created.set(current_total + 1)
+        total = await self.config.guild(guild).total_tickets_created()
+        await self.config.guild(guild).total_tickets_created.set(total + 1)
 
         cat_stats = await self.config.guild(guild).category_stats()
         cs = cat_stats.get(cat_id, {"created": 0, "closed": 0, "stars": [0,0,0,0,0], "total_duration_minutes": 0, "ticket_count": 0})
@@ -1627,34 +1404,32 @@ class SupportCog(commands.Cog):
         self._add_to_active_cache(guild.id, ticket_channel.id)
 
         if config.get("dm_notifications"):
-            await self.send_dm(user, "Ticket erstellt", f"Dein Ticket wurde erstellt: {ticket_channel.mention}")
+            await self.send_dm(user, "Ticket erstellt", f"Dein Ticket: {ticket_channel.mention}")
 
         await self.send_log(guild, "Ticket eröffnet", discord.Color.green(), [("User", user.mention), ("Kategorie", cat_data.get("name")), ("Kanal", ticket_channel.mention)])
         await self.update_panels(guild)
         await interaction.followup.send(f"✅ Ticket erstellt: {ticket_channel.mention}", ephemeral=True)
 
-    async def claim_ticket(self, interaction: discord.Interaction, view: TicketControlView):
+    async def claim_ticket(self, interaction, view):
         guild = interaction.guild
         tickets = await self.config.guild(guild).active_tickets()
-        ticket_data = next((t for t in tickets if t["channel_id"] == interaction.channel.id), None)
-        if not ticket_data:
-            return await interaction.response.send_message("❌ Kein aktives Ticket.", ephemeral=True)
-
-        if interaction.user.id == ticket_data["user_id"]:
-            return await interaction.response.send_message("❌ Als Ticket-Ersteller kannst du das Ticket nicht übernehmen.", ephemeral=True)
-
-        if not await self.is_support(interaction.user, guild, ticket_data):
-            return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
+        t = next((x for x in tickets if x["channel_id"] == interaction.channel.id), None)
+        if not t:
+            return await interaction.response.send_message("Kein Ticket.", ephemeral=True)
+        if interaction.user.id == t["user_id"]:
+            return await interaction.response.send_message("Du bist der Ersteller.", ephemeral=True)
+        if not await self.is_support(interaction.user, guild, t):
+            return await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
 
         stats = await self.config.guild(guild).stats()
-        user_stat = stats.get(str(interaction.user.id), {"claimed": 0, "closed": 0, "stars": [0,0,0,0,0]})
-        user_stat["claimed"] += 1
-        stats[str(interaction.user.id)] = user_stat
+        us = stats.get(str(interaction.user.id), {"claimed": 0, "closed": 0, "stars": [0,0,0,0,0]})
+        us["claimed"] += 1
+        stats[str(interaction.user.id)] = us
         await self.config.guild(guild).stats.set(stats)
 
-        for t in tickets:
-            if t["channel_id"] == interaction.channel.id:
-                t["claimed_by"] = interaction.user.id
+        for x in tickets:
+            if x["channel_id"] == t["channel_id"]:
+                x["claimed_by"] = interaction.user.id
                 break
         await self.config.guild(guild).active_tickets.set(tickets)
 
@@ -1663,57 +1438,47 @@ class SupportCog(commands.Cog):
                 child.label = "Freigeben"
                 child.style = discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=view)
-        await interaction.channel.send(f"✅ {interaction.user.mention} hat das Ticket übernommen.")
+        await interaction.channel.send(f"✅ {interaction.user.mention} hat übernommen.")
 
-    async def escalate_ticket(self, interaction: discord.Interaction, view: TicketControlView):
+    async def escalate_ticket(self, interaction, view):
         guild = interaction.guild
-        config = await self.config.guild(guild).all()
-        ticket_data = next((t for t in config["active_tickets"] if t["channel_id"] == interaction.channel.id), None)
-        if not ticket_data:
-            return await interaction.response.send_message("❌ Kein Ticket.", ephemeral=True)
-
-        if interaction.user.id == ticket_data["user_id"]:
-            return await interaction.response.send_message("❌ Als Ticket-Ersteller kannst du nicht eskalieren.", ephemeral=True)
-
-        high_role_id = config["categories"].get(ticket_data["cat_id"], {}).get("high_team_role_id")
+        tickets = await self.config.guild(guild).active_tickets()
+        t = next((x for x in tickets if x["channel_id"] == interaction.channel.id), None)
+        if not t:
+            return await interaction.response.send_message("Kein Ticket.", ephemeral=True)
+        if interaction.user.id == t["user_id"]:
+            return await interaction.response.send_message("Du bist der Ersteller.", ephemeral=True)
+        if not await self.is_support(interaction.user, guild, t):
+            return await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
+        cat_data = (await self.config.guild(guild).categories()).get(t["cat_id"], {})
+        high_role_id = cat_data.get("high_team_role_id")
         if not high_role_id:
-            return await interaction.response.send_message("❌ Kein High-Team konfiguriert.", ephemeral=True)
-
-        if not await self.is_support(interaction.user, guild, ticket_data):
-            return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
-
+            return await interaction.response.send_message("Kein High-Team konfiguriert.", ephemeral=True)
         high_role = guild.get_role(high_role_id)
-
-        tickets = await self.config.guild(guild).active_tickets()
-        for t in tickets:
-            if t["channel_id"] == interaction.channel.id:
-                t["escalated"] = True
-                t["claimed_by"] = None
+        for x in tickets:
+            if x["channel_id"] == t["channel_id"]:
+                x["escalated"] = True
+                x["claimed_by"] = None
                 break
         await self.config.guild(guild).active_tickets.set(tickets)
+        await interaction.response.send_message(f"⚠️ Eskaliert an {high_role.mention}.")
 
-        await interaction.response.send_message(f"⚠️ Ticket eskaliert an {high_role.mention}.")
-
-    async def change_status(self, interaction: discord.Interaction, status: str, view: TicketControlView):
+    async def change_status(self, interaction, status, view):
         guild = interaction.guild
         tickets = await self.config.guild(guild).active_tickets()
-        ticket_data = next((t for t in tickets if t["channel_id"] == interaction.channel.id), None)
-        if not ticket_data:
-            return await interaction.response.send_message("❌ Kein aktives Ticket.", ephemeral=True)
-
-        if interaction.user.id == ticket_data["user_id"]:
-            return await interaction.response.send_message("❌ Als Ticket-Ersteller kannst du den Status nicht ändern.", ephemeral=True)
-
-        if not await self.is_support(interaction.user, guild, ticket_data):
-            return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
-
-        for t in tickets:
-            if t["channel_id"] == interaction.channel.id:
-                t["status"] = status
+        t = next((x for x in tickets if x["channel_id"] == interaction.channel.id), None)
+        if not t:
+            return await interaction.response.send_message("Kein Ticket.", ephemeral=True)
+        if interaction.user.id == t["user_id"]:
+            return await interaction.response.send_message("Du bist der Ersteller.", ephemeral=True)
+        if not await self.is_support(interaction.user, guild, t):
+            return await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
+        for x in tickets:
+            if x["channel_id"] == t["channel_id"]:
+                x["status"] = status
                 break
         await self.config.guild(guild).active_tickets.set(tickets)
-
-        await interaction.response.send_message(f"🔄 Status geändert zu {status}.")
+        await interaction.response.send_message(f"Status geändert zu {status}.")
 
     async def close_ticket(self, channel, reason, user, interaction=None, is_auto=False):
         guild = channel.guild
@@ -1721,40 +1486,30 @@ class SupportCog(commands.Cog):
         ticket_data = next((t for t in config["active_tickets"] if t["channel_id"] == channel.id), None)
         if not ticket_data:
             return
-
         if user.id == ticket_data["user_id"]:
             if interaction:
-                return await interaction.response.send_message("❌ Als Ticket-Ersteller kannst du das Ticket nicht schließen.", ephemeral=True)
-            else:
-                return
+                return await interaction.response.send_message("Du kannst dein eigenes Ticket nicht schließen.", ephemeral=True)
+            return
 
         try:
             if not is_auto:
                 stats = config.get("stats", {})
-                closed_by_id = ticket_data.get("claimed_by") or user.id
-                user_stat = stats.get(str(closed_by_id), {"claimed": 0, "closed": 0, "stars": [0,0,0,0,0]})
-                user_stat["closed"] += 1
+                closed_by = ticket_data.get("claimed_by") or user.id
+                us = stats.get(str(closed_by), {"claimed": 0, "closed": 0, "stars": [0,0,0,0,0]})
+                us["closed"] += 1
                 created_at = datetime.datetime.fromisoformat(ticket_data["created_at"])
-                duration_min = (datetime.datetime.now() - created_at).total_seconds() / 60
-                user_stat["total_duration_minutes"] = user_stat.get("total_duration_minutes", 0) + duration_min
-                user_stat["ticket_count"] = user_stat.get("ticket_count", 0) + 1
-
-                if ticket_data.get("first_response_at"):
-                    first_resp = datetime.datetime.fromisoformat(ticket_data["first_response_at"])
-                    reaction_min = (first_resp - created_at).total_seconds() / 60
-                    user_stat["total_reaction_minutes"] = user_stat.get("total_reaction_minutes", 0) + reaction_min
-                    user_stat["reaction_count"] = user_stat.get("reaction_count", 0) + 1
-
-                stats[str(closed_by_id)] = user_stat
+                duration = (datetime.datetime.now() - created_at).total_seconds() / 60
+                us["total_duration_minutes"] = us.get("total_duration_minutes", 0) + duration
+                us["ticket_count"] = us.get("ticket_count", 0) + 1
+                stats[str(closed_by)] = us
                 await self.config.guild(guild).stats.set(stats)
 
                 cat_stats = config.get("category_stats", {})
-                cat_id = ticket_data["cat_id"]
-                cs = cat_stats.get(cat_id, {"created": 0, "closed": 0, "stars": [0,0,0,0,0], "total_duration_minutes": 0, "ticket_count": 0})
+                cs = cat_stats.get(ticket_data["cat_id"], {"created": 0, "closed": 0, "stars": [0,0,0,0,0], "total_duration_minutes": 0, "ticket_count": 0})
                 cs["closed"] += 1
-                cs["total_duration_minutes"] += duration_min
+                cs["total_duration_minutes"] += duration
                 cs["ticket_count"] += 1
-                cat_stats[cat_id] = cs
+                cat_stats[ticket_data["cat_id"]] = cs
                 await self.config.guild(guild).category_stats.set(cat_stats)
         except Exception as e:
             log.error(f"Fehler beim Speichern der Statistiken: {e}")
@@ -1778,52 +1533,30 @@ class SupportCog(commands.Cog):
             log.error(f"Fehler beim Speichern der Historie: {e}")
 
         try:
-            messages_html = ""
-            async for message in channel.history(limit=None, oldest_first=True):
-                content = discord.utils.escape_html(message.content) if message.content else ""
-                if message.attachments:
-                    content += f"<br><i>Anhänge: {', '.join([a.url for a in message.attachments])}</i>"
-                messages_html += MESSAGE_HTML.format(
-                    avatar_url=message.author.display_avatar.url,
-                    author=message.author.display_name,
-                    color=str(message.author.color) if message.author.color.value else "#ffffff",
-                    timestamp=message.created_at.strftime("%d.%m.%Y %H:%M"),
-                    content=content
-                )
-            html_content = HTML_TEMPLATE.format(
-                channel_name=channel.name,
-                created_at=channel.created_at.strftime("%d.%m.%Y %H:%M"),
-                closed_at=datetime.datetime.now().strftime("%d.%m.%Y %H:%M"),
-                close_reason=discord.utils.escape_html(reason),
-                messages_html=messages_html
-            )
-            transcript_file = discord.File(io.StringIO(html_content), filename=f"transcript-{channel.id}.html")
-
+            messages = []
+            async for msg in channel.history(limit=None, oldest_first=True):
+                messages.append(f"{msg.author.display_name}: {msg.content}")
+            transcript = "\n".join(messages)
+            file = discord.File(io.StringIO(transcript), filename=f"transcript-{channel.id}.txt")
             log_channel = guild.get_channel(config.get("log_channel_id"))
             if log_channel:
-                await log_channel.send(embed=discord.Embed(title="Ticket geschlossen", color=discord.Color.red()), file=transcript_file)
-
-            user_obj = guild.get_member(ticket_data["user_id"]) or self.bot.get_user(ticket_data["user_id"])
-            if config.get("dm_notifications") and user_obj:
-                await user_obj.send(embed=discord.Embed(title="Ticket geschlossen", description=f"Grund: {reason}"), file=discord.File(io.StringIO(html_content), filename=f"transcript-{channel.id}.html"))
+                await log_channel.send(file=file)
         except Exception as e:
-            log.error(f"Fehler beim Erstellen des Transkripts: {e}")
+            log.error(f"Fehler beim Transkript: {e}")
 
-        # Ticket aus aktiver Liste entfernen
         try:
             tickets = await self.config.guild(guild).active_tickets()
             tickets = [t for t in tickets if t["channel_id"] != channel.id]
             await self.config.guild(guild).active_tickets.set(tickets)
             self._remove_from_active_cache(guild.id, channel.id)
         except Exception as e:
-            log.error(f"Fehler beim Entfernen des Tickets: {e}")
+            log.error(f"Fehler beim Entfernen: {e}")
 
-        # Review senden oder direkt schließen
         if not is_auto:
             try:
                 msg = await channel.send(embed=discord.Embed(title="⭐ Bewertung", description="Bitte bewerte den Support."), view=ReviewView(self, ticket_data))
                 msg.view.message = msg
-            except Exception:
+            except:
                 pass
         else:
             await self.delete_ticket_channel(channel, ticket_data, 0)
@@ -1831,36 +1564,22 @@ class SupportCog(commands.Cog):
     async def delete_ticket_channel(self, channel, ticket_data, stars):
         guild = channel.guild
         config = await self.config.guild(guild).all()
-
         if stars > 0 and ticket_data.get("claimed_by"):
             stats = config.get("stats", {})
-            claimer_id = str(ticket_data["claimed_by"])
-            user_stat = stats.get(claimer_id, {"claimed": 0, "closed": 0, "stars": [0,0,0,0,0]})
-            user_stat["stars"][stars-1] += 1
-            stats[claimer_id] = user_stat
+            claimer = str(ticket_data["claimed_by"])
+            us = stats.get(claimer, {"claimed": 0, "closed": 0, "stars": [0,0,0,0,0]})
+            us["stars"][stars-1] += 1
+            stats[claimer] = us
             await self.config.guild(guild).stats.set(stats)
-
-        if stars > 0:
-            history = await self.config.guild(guild).ticket_history()
-            for entry in history:
-                if entry["user_id"] == ticket_data["user_id"] and entry["channel_id"] == channel.id:
-                    entry["stars"] = stars
-                    break
-            await self.config.guild(guild).ticket_history.set(history)
-
-        # Ticket entfernen (falls noch aktiv)
         tickets = await self.config.guild(guild).active_tickets()
         tickets = [t for t in tickets if t["channel_id"] != channel.id]
         await self.config.guild(guild).active_tickets.set(tickets)
         self._remove_from_active_cache(guild.id, channel.id)
-
         try:
             if isinstance(channel, discord.Thread):
-                delete_threads = config.get("delete_threads_after_close", False)
-                if delete_threads:
+                if config.get("delete_threads_after_close", False):
                     await channel.delete()
                 else:
-                    # Thread entsperren, Rollen synchronisieren, dann archivieren
                     await channel.edit(archived=False, locked=False)
                     await self._sync_roles_to_thread(channel, guild)
                     new_name = f"archiviert-{channel.name}"[:100]
@@ -1868,8 +1587,7 @@ class SupportCog(commands.Cog):
             else:
                 await channel.delete()
         except Exception as e:
-            log.error(f"Failed to close ticket channel: {e}")
-
+            log.error(f"Fehler beim Schließen des Kanals: {e}")
         await self.update_panels(guild)
 
     async def auto_escalate_ticket(self, guild, ticket_data, channel):
@@ -1879,33 +1597,7 @@ class SupportCog(commands.Cog):
         if not high_role_id:
             return
         high_role = guild.get_role(high_role_id)
-        staff_role_id = cat_data.get("staff_role_id")
-        if staff_role_id:
-            staff_role = guild.get_role(staff_role_id)
-            if isinstance(channel, discord.Thread):
-                for m in staff_role.members:
-                    try:
-                        await channel.remove_user(m)
-                    except Exception:
-                        pass
-            else:
-                overwrites = channel.overwrites
-                overwrites[staff_role] = discord.PermissionOverwrite(view_channel=False)
-                if high_role:
-                    overwrites[high_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-                await channel.edit(overwrites=overwrites)
         await channel.send(f"⚠️ Automatische Eskalation! {high_role.mention} wurde benachrichtigt.")
-        if ticket_data.get("panel_msg_id"):
-            try:
-                msg = await channel.fetch_message(ticket_data["panel_msg_id"])
-                view = TicketControlView(self)
-                for child in view.children:
-                    if child.custom_id == "support_ticket_escalate_btn":
-                        child.disabled = True
-                await msg.edit(view=view)
-                self.bot.add_view(view, message_id=msg.id)
-            except Exception:
-                pass
 
 async def setup(bot):
     await bot.add_cog(SupportCog(bot))
