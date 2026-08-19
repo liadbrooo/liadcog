@@ -1,8 +1,6 @@
 """
-SupportCog V43 - Full Featured + Setup Wizard
-- Textbasierter Wizard für komplette Einrichtung
-- Alle bisherigen Funktionen (Stats, Verlauf, Zusammenfassungen, Reaktionszeit, Rollen-Sync)
-- Stabil durch Textabfragen statt komplexer Views
+SupportCog V45 - Final Stable Release
+Enthält alle Features und behebt alle bekannten Fehler.
 """
 
 import discord
@@ -374,6 +372,129 @@ class CategorySetupView(discord.ui.View):
         self.stop()
 
 
+class BaseSetupView(discord.ui.View):
+    """Interaktive Basis-Konfiguration."""
+    def __init__(self, cog: "SupportCog", ctx: commands.Context):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.ctx = ctx
+        self.log_channel_id = None
+        self.dm_notifications = True
+        self.autoclose_hours = 48
+        self.cooldown_minutes = 0
+        self.max_tickets_per_user = 1
+        self.delete_threads_after_close = False
+        self.auto_escalate_hours = 0
+        self.show_category_stats = True
+        self.use_emoji_charts = True
+        self._build_ui()
+
+    def _build_ui(self):
+        log_options = [discord.SelectOption(label=f"#{c.name}"[:100], value=str(c.id)) for c in self.ctx.guild.text_channels[:25]]
+        if not log_options:
+            log_options = [discord.SelectOption(label="Keine Textkanäle", value="none")]
+        self.log_sel = discord.ui.Select(placeholder="Log-Channel wählen", options=log_options, row=0)
+        self.log_sel.callback = self._log_select_cb
+        self.add_item(self.log_sel)
+
+        self.btn_dm = discord.ui.Button(label="DMs: AN", style=discord.ButtonStyle.success, emoji='✉️', row=1)
+        self.btn_dm.callback = self._dm_toggle_cb
+        self.add_item(self.btn_dm)
+
+        self.btn_auto = discord.ui.Button(label=f"Auto-Close: {self.autoclose_hours}h", style=discord.ButtonStyle.secondary, emoji='⏳', row=1)
+        self.btn_auto.callback = self._auto_cb
+        self.add_item(self.btn_auto)
+
+        self.btn_cool = discord.ui.Button(label=f"Cooldown: {self.cooldown_minutes}m", style=discord.ButtonStyle.secondary, emoji='❄️', row=1)
+        self.btn_cool.callback = self._cool_cb
+        self.add_item(self.btn_cool)
+
+        self.btn_max = discord.ui.Button(label=f"Max Tickets: {self.max_tickets_per_user}", style=discord.ButtonStyle.secondary, emoji='🔢', row=1)
+        self.btn_max.callback = self._max_cb
+        self.add_item(self.btn_max)
+
+        self.btn_del_thread = discord.ui.Button(label="Threads löschen: AUS", style=discord.ButtonStyle.danger, emoji='🗑️', row=2)
+        self.btn_del_thread.callback = self._del_thread_toggle_cb
+        self.add_item(self.btn_del_thread)
+
+        self.btn_esc = discord.ui.Button(label=f"Auto-Eskalation: {self.auto_escalate_hours}h", style=discord.ButtonStyle.secondary, emoji='🚨', row=2)
+        self.btn_esc.callback = self._esc_cb
+        self.add_item(self.btn_esc)
+
+        self.btn_catstats = discord.ui.Button(label="Kategorie-Statistiken: AN", style=discord.ButtonStyle.success, emoji='📊', row=2)
+        self.btn_catstats.callback = self._catstats_toggle_cb
+        self.add_item(self.btn_catstats)
+
+        self.btn_emoji = discord.ui.Button(label="Emoji-Balken: AN", style=discord.ButtonStyle.success, emoji='📈', row=2)
+        self.btn_emoji.callback = self._emoji_toggle_cb
+        self.add_item(self.btn_emoji)
+
+        self.btn_finish = discord.ui.Button(label="Setup abschließen", style=discord.ButtonStyle.success, emoji='✅', row=3)
+        self.btn_finish.callback = self._finish_cb
+        self.add_item(self.btn_finish)
+
+    def _update_labels(self):
+        self.btn_dm.label = f"DMs: {'AN' if self.dm_notifications else 'AUS'}"
+        self.btn_dm.style = discord.ButtonStyle.success if self.dm_notifications else discord.ButtonStyle.danger
+        self.btn_auto.label = f"Auto-Close: {self.autoclose_hours}h"
+        self.btn_cool.label = f"Cooldown: {self.cooldown_minutes}m"
+        self.btn_max.label = f"Max Tickets: {self.max_tickets_per_user}"
+        self.btn_del_thread.label = f"Threads löschen: {'AN' if self.delete_threads_after_close else 'AUS'}"
+        self.btn_del_thread.style = discord.ButtonStyle.success if self.delete_threads_after_close else discord.ButtonStyle.danger
+        self.btn_esc.label = f"Auto-Eskalation: {self.auto_escalate_hours}h"
+        self.btn_catstats.label = f"Kategorie-Statistiken: {'AN' if self.show_category_stats else 'AUS'}"
+        self.btn_catstats.style = discord.ButtonStyle.success if self.show_category_stats else discord.ButtonStyle.danger
+        self.btn_emoji.label = f"Emoji-Balken: {'AN' if self.use_emoji_charts else 'AUS'}"
+        self.btn_emoji.style = discord.ButtonStyle.success if self.use_emoji_charts else discord.ButtonStyle.danger
+
+    async def _log_select_cb(self, interaction: discord.Interaction):
+        if self.log_sel.values[0] != "none":
+            self.log_channel_id = int(self.log_sel.values[0])
+            ch = self.ctx.guild.get_channel(self.log_channel_id)
+            self.log_sel.placeholder = f"Log-Channel: #{ch.name}" if ch else "Log-Channel wählen"
+        else:
+            self.log_sel.placeholder = "Log-Channel wählen"
+        await interaction.response.edit_message(view=self)
+
+    async def _dm_toggle_cb(self, interaction: discord.Interaction):
+        self.dm_notifications = not self.dm_notifications
+        self._update_labels()
+        await interaction.response.edit_message(view=self)
+
+    async def _auto_cb(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(SimpleNumberModal(self, "autoclose_hours", "Auto-Close (Stunden)", 0, 500))
+
+    async def _cool_cb(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(SimpleNumberModal(self, "cooldown_minutes", "Cooldown (Minuten)", 0, 10080))
+
+    async def _max_cb(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(SimpleNumberModal(self, "max_tickets_per_user", "Max Tickets pro User", 1, 10))
+
+    async def _del_thread_toggle_cb(self, interaction: discord.Interaction):
+        self.delete_threads_after_close = not self.delete_threads_after_close
+        self._update_labels()
+        await interaction.response.edit_message(view=self)
+
+    async def _esc_cb(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(SimpleNumberModal(self, "auto_escalate_hours", "Auto-Eskalation nach Stunden (0=aus)", 0, 500))
+
+    async def _catstats_toggle_cb(self, interaction: discord.Interaction):
+        self.show_category_stats = not self.show_category_stats
+        self._update_labels()
+        await interaction.response.edit_message(view=self)
+
+    async def _emoji_toggle_cb(self, interaction: discord.Interaction):
+        self.use_emoji_charts = not self.use_emoji_charts
+        self._update_labels()
+        await interaction.response.edit_message(view=self)
+
+    async def _finish_cb(self, interaction: discord.Interaction):
+        if not self.log_channel_id:
+            return await interaction.response.send_message("Bitte wähle zuerst einen Log-Channel aus!", ephemeral=True)
+        await self.cog.finish_base_setup(interaction, self)
+        self.stop()
+
+
 class SupportCog(commands.Cog):
     def __init__(self, bot: Red):
         self.bot = bot
@@ -685,24 +806,33 @@ class SupportCog(commands.Cog):
     @ticket_cmd.command(name="help")
     async def ticket_help(self, ctx):
         embed = discord.Embed(title="🎫 Ticket System Hilfe", color=discord.Color.blurple())
-        embed.add_field(name="Setup", value="`[p]ticket setup` – Textbasierter Einrichtungs-Wizard\n`[p]ticket addcat` – Einzelne Kategorie hinzufügen", inline=False)
+        embed.add_field(name="Setup", value="`[p]ticket setup` – Interaktive Einrichtung\n`[p]ticket set` – Geführter Wizard\n`[p]ticket addcat` – Einzelne Kategorie", inline=False)
         embed.add_field(name="Panel", value="`[p]ticket panel #channel` – Panel posten", inline=False)
         embed.add_field(name="Verwaltung", value="`[p]ticket listcat`, `[p]ticket blacklist @User`, `[p]ticket managecats`, `[p]ticket stats`, `[p]ticket history @User`, `[p]ticket syncroles`", inline=False)
         embed.add_field(name="Support", value="`[p]tadd @User`, `[p]tremove @User`, `[p]trename Name`, `[p]ticket forceclose`", inline=False)
         await ctx.send(embed=embed)
 
-    # --- NEUER SETUP-WIZARD (textbasiert) ---
-    @ticket_cmd.command(name="setup", aliases=["set"])
-    async def ticket_setup_wizard(self, ctx):
+    # Interaktiver Setup-Befehl
+    @ticket_cmd.command(name="setup")
+    async def ticket_setup(self, ctx):
+        try:
+            view = BaseSetupView(self, ctx)
+        except Exception as e:
+            return await ctx.send(f"❌ Fehler beim Setup: {e}")
+        msg = await ctx.send(embed=discord.Embed(title="🛠️ Basis-Setup", description="Passe die Einstellungen an."), view=view)
+        view.message = msg
+
+    # Neuer Wizard-Befehl
+    @ticket_cmd.command(name="set", aliases=["wizard"])
+    async def ticket_set_wizard(self, ctx):
         """Startet den geführten Einrichtungs-Wizard."""
         guild = ctx.guild
         author = ctx.author
-        timeout = 120  # Sekunden
+        timeout = 120
 
         def check(m):
             return m.author == author and m.channel == ctx.channel
 
-        # Hilfsfunktion für Eingaben
         async def ask(question):
             await ctx.send(question)
             try:
@@ -712,23 +842,21 @@ class SupportCog(commands.Cog):
                 await ctx.send("⏰ Zeit abgelaufen. Bitte starte den Wizard erneut.")
                 return None
 
-        # 1. Log-Channel
+        # Log-Channel
         log_channel = None
         while log_channel is None:
             answer = await ask("Bitte gib den **Log-Channel** an (ID oder #Erwähnung):")
-            if answer is None:
-                return
+            if answer is None: return
             try:
                 log_channel = await commands.TextChannelConverter().convert(ctx, answer)
             except:
                 await ctx.send("❌ Kanal nicht gefunden. Versuche es erneut.")
 
-        # 2. DM-Benachrichtigungen
+        # DM-Benachrichtigungen
         dm_on = None
         while dm_on is None:
             answer = await ask("Sollen Nutzer **DM-Benachrichtigungen** erhalten? (ja/nein)")
-            if answer is None:
-                return
+            if answer is None: return
             if answer.lower() in ['ja', 'j', 'yes', 'y']:
                 dm_on = True
             elif answer.lower() in ['nein', 'n', 'no']:
@@ -736,54 +864,47 @@ class SupportCog(commands.Cog):
             else:
                 await ctx.send("❌ Bitte antworte mit 'ja' oder 'nein'.")
 
-        # 3. Auto-Close Stunden
+        # Auto-Close
         autoclose = None
         while autoclose is None:
             answer = await ask("Nach wie vielen Stunden **Inaktivität** soll ein Ticket automatisch geschlossen werden? (0 = aus)")
-            if answer is None:
-                return
+            if answer is None: return
             try:
                 autoclose = int(answer)
-                if autoclose < 0 or autoclose > 500:
-                    raise ValueError
+                if autoclose < 0 or autoclose > 500: raise ValueError
             except:
                 await ctx.send("❌ Bitte eine Zahl zwischen 0 und 500 eingeben.")
                 autoclose = None
 
-        # 4. Cooldown Minuten
+        # Cooldown
         cooldown = None
         while cooldown is None:
             answer = await ask("Wie lange soll der **Cooldown** zwischen zwei Tickets eines Nutzers sein? (Minuten, 0 = aus)")
-            if answer is None:
-                return
+            if answer is None: return
             try:
                 cooldown = int(answer)
-                if cooldown < 0 or cooldown > 10080:
-                    raise ValueError
+                if cooldown < 0 or cooldown > 10080: raise ValueError
             except:
                 await ctx.send("❌ Bitte eine Zahl zwischen 0 und 10080 eingeben.")
                 cooldown = None
 
-        # 5. Max Tickets pro User
+        # Max Tickets pro User
         max_tickets = None
         while max_tickets is None:
             answer = await ask("Wie viele **offene Tickets pro Nutzer** sind gleichzeitig erlaubt?")
-            if answer is None:
-                return
+            if answer is None: return
             try:
                 max_tickets = int(answer)
-                if max_tickets < 1 or max_tickets > 10:
-                    raise ValueError
+                if max_tickets < 1 or max_tickets > 10: raise ValueError
             except:
                 await ctx.send("❌ Bitte eine Zahl zwischen 1 und 10 eingeben.")
                 max_tickets = None
 
-        # 6. Threads löschen?
+        # Threads löschen?
         delete_threads = None
         while delete_threads is None:
             answer = await ask("Sollen **Threads beim Schließen gelöscht** werden? (ja) oder archiviert? (nein)")
-            if answer is None:
-                return
+            if answer is None: return
             if answer.lower() in ['ja', 'j', 'yes', 'y']:
                 delete_threads = True
             elif answer.lower() in ['nein', 'n', 'no']:
@@ -791,27 +912,24 @@ class SupportCog(commands.Cog):
             else:
                 await ctx.send("❌ Bitte antworte mit 'ja' oder 'nein'.")
 
-        # 7. Auto-Eskalation Stunden
+        # Auto-Eskalation
         auto_esc = None
         while auto_esc is None:
             answer = await ask("Nach wie vielen Stunden soll ein Ticket mit Status 'Wartet auf Team' **automatisch eskaliert** werden? (0 = aus)")
-            if answer is None:
-                return
+            if answer is None: return
             try:
                 auto_esc = int(answer)
-                if auto_esc < 0 or auto_esc > 500:
-                    raise ValueError
+                if auto_esc < 0 or auto_esc > 500: raise ValueError
             except:
                 await ctx.send("❌ Bitte eine Zahl zwischen 0 und 500 eingeben.")
                 auto_esc = None
 
-        # 8. Kategorien hinzufügen (Schleife)
+        # Kategorien hinzufügen
         categories = {}
         add_more = True
         while add_more:
             answer = await ask("Möchtest du jetzt eine **Support-Kategorie** hinzufügen? (ja/nein)")
-            if answer is None:
-                return
+            if answer is None: return
             if answer.lower() in ['nein', 'n', 'no']:
                 add_more = False
                 break
@@ -819,7 +937,6 @@ class SupportCog(commands.Cog):
                 await ctx.send("❌ Bitte antworte mit 'ja' oder 'nein'.")
                 continue
 
-            # Kategorie-Daten sammeln
             cat_name = None
             while cat_name is None:
                 cat_name = await ask("**Name der Kategorie** (z.B. Allgemeiner Support):")
@@ -843,7 +960,6 @@ class SupportCog(commands.Cog):
                     await ctx.send("❌ Abkürzung max. 10 Zeichen.")
                     cat_abbr = None
 
-            # Typ auswählen: channel oder thread
             typ = None
             while typ is None:
                 answer = await ask("Sollen Tickets als **Textkanal** in einer Kategorie oder als **Thread** erstellt werden? (channel/thread)")
@@ -858,7 +974,6 @@ class SupportCog(commands.Cog):
             discord_cat_id = None
             thread_parent_id = None
             if typ == 'channel':
-                # Discord-Kategorie auswählen
                 while discord_cat_id is None:
                     answer = await ask("Bitte gib die **Discord-Kategorie** an (ID oder Name):")
                     if answer is None: return
@@ -868,7 +983,6 @@ class SupportCog(commands.Cog):
                     except:
                         await ctx.send("❌ Kategorie nicht gefunden.")
             else:
-                # Thread-Channel auswählen
                 while thread_parent_id is None:
                     answer = await ask("Bitte gib den **Textkanal** an, in dem Threads erstellt werden sollen (ID oder #Erwähnung):")
                     if answer is None: return
@@ -878,7 +992,6 @@ class SupportCog(commands.Cog):
                     except:
                         await ctx.send("❌ Textkanal nicht gefunden.")
 
-            # Support-Rolle
             staff_role_id = None
             while staff_role_id is None:
                 answer = await ask("Bitte gib die **Support-Rolle** an (ID oder Name):")
@@ -889,7 +1002,6 @@ class SupportCog(commands.Cog):
                 except:
                     await ctx.send("❌ Rolle nicht gefunden.")
 
-            # High-Team Rolle (optional)
             high_role_id = None
             answer = await ask("**High-Team-Rolle** (optional, Enter zum Überspringen):")
             if answer is None: return
@@ -900,20 +1012,17 @@ class SupportCog(commands.Cog):
                 except:
                     await ctx.send("❌ Rolle nicht gefunden. High-Team wird übersprungen.")
 
-            # Max Tickets für Kategorie
             cat_max = None
             while cat_max is None:
                 answer = await ask("Maximale **aktive Tickets** in dieser Kategorie gleichzeitig? (0 = unbegrenzt)")
                 if answer is None: return
                 try:
                     cat_max = int(answer)
-                    if cat_max < 0 or cat_max > 100:
-                        raise ValueError
+                    if cat_max < 0 or cat_max > 100: raise ValueError
                 except:
                     await ctx.send("❌ Bitte eine Zahl zwischen 0 und 100.")
                     cat_max = None
 
-            # Kategorie speichern
             cat_id = str(uuid.uuid4())[:8]
             categories[cat_id] = {
                 "name": cat_name,
@@ -928,7 +1037,7 @@ class SupportCog(commands.Cog):
             }
             await ctx.send(f"✅ Kategorie **{cat_name}** hinzugefügt.")
 
-        # 9. Panel posten?
+        # Panel posten?
         panel_channel = None
         answer = await ask("Möchtest du das **Ticket-Panel** jetzt in einem Kanal posten? (ja/nein)")
         if answer is None: return
@@ -952,7 +1061,6 @@ class SupportCog(commands.Cog):
         if categories:
             await self.config.guild(guild).categories.set(categories)
 
-        # Panel posten
         if panel_channel:
             await self.create_panel(panel_channel)
 
@@ -961,8 +1069,7 @@ class SupportCog(commands.Cog):
                        f"Kategorien: {len(categories)}\n"
                        f"Panel: {panel_channel.mention if panel_channel else 'Nicht gepostet'}")
 
-
-    # --- Bestehende Befehle (unverändert ab hier) ---
+    # Weitere Befehle
     @ticket_cmd.command(name="addcat")
     async def ticket_addcat(self, ctx):
         try:
@@ -1286,9 +1393,17 @@ class SupportCog(commands.Cog):
         await self.config.guild(guild).panels.set(valid)
 
     async def finish_base_setup(self, interaction, wizard):
-        # Diese Methode wird vom alten View-Setup nicht mehr verwendet,
-        # aber für Kompatibilität behalten.
-        pass
+        guild = interaction.guild
+        await self.config.guild(guild).log_channel_id.set(wizard.log_channel_id)
+        await self.config.guild(guild).dm_notifications.set(wizard.dm_notifications)
+        await self.config.guild(guild).autoclose_hours.set(wizard.autoclose_hours)
+        await self.config.guild(guild).cooldown_minutes.set(wizard.cooldown_minutes)
+        await self.config.guild(guild).max_tickets_per_user.set(wizard.max_tickets_per_user)
+        await self.config.guild(guild).delete_threads_after_close.set(wizard.delete_threads_after_close)
+        await self.config.guild(guild).auto_escalate_hours.set(wizard.auto_escalate_hours)
+        await self.config.guild(guild).show_category_stats.set(wizard.show_category_stats)
+        await self.config.guild(guild).use_emoji_charts.set(wizard.use_emoji_charts)
+        await interaction.response.edit_message(content="✅ Setup abgeschlossen!", view=None)
 
     async def save_category(self, interaction, wizard, cat_id=None):
         guild = interaction.guild
@@ -1533,14 +1648,33 @@ class SupportCog(commands.Cog):
             log.error(f"Fehler beim Speichern der Historie: {e}")
 
         try:
-            messages = []
-            async for msg in channel.history(limit=None, oldest_first=True):
-                messages.append(f"{msg.author.display_name}: {msg.content}")
-            transcript = "\n".join(messages)
-            file = discord.File(io.StringIO(transcript), filename=f"transcript-{channel.id}.txt")
+            messages_html = ""
+            async for message in channel.history(limit=None, oldest_first=True):
+                content = discord.utils.escape_html(message.content) if message.content else ""
+                if message.attachments:
+                    content += f"<br><i>Anhänge: {', '.join([a.url for a in message.attachments])}</i>"
+                messages_html += MESSAGE_HTML.format(
+                    avatar_url=message.author.display_avatar.url,
+                    author=message.author.display_name,
+                    color=str(message.author.color) if message.author.color.value else "#ffffff",
+                    timestamp=message.created_at.strftime("%d.%m.%Y %H:%M"),
+                    content=content
+                )
+            html_content = HTML_TEMPLATE.format(
+                channel_name=channel.name,
+                created_at=channel.created_at.strftime("%d.%m.%Y %H:%M"),
+                closed_at=datetime.datetime.now().strftime("%d.%m.%Y %H:%M"),
+                close_reason=discord.utils.escape_html(reason),
+                messages_html=messages_html
+            )
+            transcript_file = discord.File(io.StringIO(html_content), filename=f"transcript-{channel.id}.html")
             log_channel = guild.get_channel(config.get("log_channel_id"))
             if log_channel:
-                await log_channel.send(file=file)
+                await log_channel.send(embed=discord.Embed(title="Ticket geschlossen", color=discord.Color.red()), file=transcript_file)
+
+            user_obj = guild.get_member(ticket_data["user_id"]) or self.bot.get_user(ticket_data["user_id"])
+            if config.get("dm_notifications") and user_obj:
+                await user_obj.send(embed=discord.Embed(title="Ticket geschlossen", description=f"Grund: {reason}"), file=discord.File(io.StringIO(html_content), filename=f"transcript-{channel.id}.html"))
         except Exception as e:
             log.error(f"Fehler beim Transkript: {e}")
 
