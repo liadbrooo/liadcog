@@ -387,11 +387,11 @@ class MemberAnalyst(commands.Cog):
         await ctx.send(embed=embed)
 
     # ---------------------------------------------------------------
-    # Befehl: [p]wachstum [Tage] - Wachstumsdiagramm (Beitritte pro Tag)
+    # Befehl: [p]beitrittswachstum [Tage] - Wachstumsdiagramm (umbenannt)
     # ---------------------------------------------------------------
     @commands.command()
     @checks.admin_or_permissions(manage_guild=True)
-    async def wachstum(self, ctx, days: int = 30):
+    async def beitrittswachstum(self, ctx, days: int = 30):
         """Zeigt ein ASCII‑Balkendiagramm der Beitritte pro Tag über die letzten X Tage."""
         guild = ctx.guild
         now = self._now()
@@ -414,7 +414,7 @@ class MemberAnalyst(commands.Cog):
 
         diagram_text = self._create_bar_text(labels, values)
         embed = discord.Embed(
-            title=f"📈 Wachstum – Beitritte pro Tag (letzte {days} Tage)",
+            title=f"📈 Beitrittswachstum – Beitritte pro Tag (letzte {days} Tage)",
             description=f"```\n{diagram_text}\n```",
             color=discord.Color.orange(),
         )
