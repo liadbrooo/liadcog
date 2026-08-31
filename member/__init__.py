@@ -249,7 +249,7 @@ class MemberAnalyst(commands.Cog):
             title=f"🕒 Account-Alter von {member.display_name}",
             color=member.color,
         )
-        embed.set_thumbnail(url=member.avatar_url)
+        embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(
             name="Account erstellt am",
             value=member.created_at.strftime("%d.%m.%Y %H:%M UTC"),
@@ -422,7 +422,7 @@ class MemberAnalyst(commands.Cog):
 
 
 # ---------------------------------------------------------------
-# Setup-Funktion für RedBot
+# Setup-Funktion für RedBot (async für neue Versionen)
 # ---------------------------------------------------------------
-def setup(bot):
-    bot.add_cog(MemberAnalyst(bot))
+async def setup(bot):
+    await bot.add_cog(MemberAnalyst(bot))
