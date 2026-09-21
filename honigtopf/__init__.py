@@ -28,28 +28,30 @@ class Honigtopf(commands.Cog):
         self.config.register_guild(**default_guild)
 
     def get_honeypot_view(self, kicks):
-        """Erstellt das cleane Container-Design für den Honeypot."""
+        """Erstellt das cleane, einteilige Container-Design für den Honigtopf."""
         if not V2_AVAILABLE:
             return None
 
         view = LayoutView()
-
-        # Container 1: Hauptwarnung (Gelber Akzent)
-        main_container = Container(accent_color=discord.Color.gold())
-        main_container.add_item(TextDisplay("## ⚠️ NICHT HIER SCHREIBEN ⚠️"))
-        main_container.add_item(TextDisplay(
+        
+        # Ein einziger, sauberer Container mit goldenem Akzent
+        container = Container(accent_color=discord.Color.gold())
+        
+        # Header
+        container.add_item(TextDisplay("## 🍯 Honigtopf"))
+        
+        # Beschreibung
+        container.add_item(TextDisplay(
             "Dieser Kanal dient dazu, Spam-Bots zu fangen.\n"
             "Jegliche Nachrichten, die hier gesendet werden, führen zu einem **Softban**."
         ))
-        main_container.add_item(Separator())
+        
+        container.add_item(Separator())
+        
+        # Kick-Zähler als dezenter Subtext (clean!)
+        container.add_item(TextDisplay(f"-# 🗑️ **Bisherige Kicks:** {kicks}"))
 
-        # Container 2: Kick-Zähler (Grauer Akzent)
-        counter_container = Container(accent_color=discord.Color.dark_gray())
-        counter_container.add_item(TextDisplay(f"🍯 **Kicks:** {kicks}"))
-
-        view.add_item(main_container)
-        view.add_item(counter_container)
-
+        view.add_item(container)
         return view
 
     async def update_honigtopf_message(self, guild):
@@ -81,14 +83,14 @@ class Honigtopf(commands.Cog):
             else:
                 # Fallback, falls V2 nicht verfügbar ist
                 embed = discord.Embed(
-                    title="⚠️ NICHT HIER SCHREIBEN ⚠️",
+                    title="🍯 Honigtopf",
                     description=(
                         "Dieser Kanal dient dazu, Spam-Bots zu fangen.\n"
-                        "Jegliche Nachrichten, die hier gesendet werden, führen zu einem **Softban**."
+                        "Jegliche Nachrichten, die hier gesendet werden, führen zu einem **Softban**.\n\n"
+                        f"-# 🗑️ **Bisherige Kicks:** {kicks}"
                     ),
                     color=discord.Color.gold(),
                 )
-                embed.set_footer(text=f"🍯 Kicks: {kicks}")
                 await message.edit(content=None, embed=embed, view=None)
         except Exception as e:
             log.error(f"[Honigtopf] Fehler beim Editieren: {type(e).__name__}: {e}")
@@ -118,12 +120,10 @@ class Honigtopf(commands.Cog):
         punished = False
 
         try:
-            # Neuere discord.py Versionen nutzen delete_message_seconds
             await member.ban(reason="Honigtopf ausgelöst (Softban)", delete_message_seconds=86400)
             await guild.unban(member, reason="Softban aufgehoben (Honigtopf)")
             punished = True
         except TypeError:
-            # Fallback für ältere discord.py Versionen
             try:
                 await member.ban(reason="Honigtopf ausgelöst (Softban)", delete_message_days=1)
                 await guild.unban(member, reason="Softban aufgehoben (Honigtopf)")
@@ -160,14 +160,14 @@ class Honigtopf(commands.Cog):
 
         log.info(f"[Honigtopf] {member} wurde bestraft. Kicks: {new_kicks}")
 
-    # ---------------- COMMANDS (Präfix 'h') ----------------
+    # ---------------- COMMANDS ----------------
 
-    @commands.command(name="hhonigtopfsetup")
+    @commands.command(name="honigtopfsetup")
     @commands.admin_or_permissions(manage_guild=True)
-    async def hhonigtopfsetup(self, ctx, channel: discord.TextChannel):
+    async def honigtopfsetup(self, ctx, channel: discord.TextChannel):
         """Richtet den Honigtopf-Kanal ein."""
         embed = discord.Embed(
-            title="⚠️ NICHT HIER SCHREIBEN ⚠️",
+            title="🍯 Honigtopf",
             description="Der Honigtopf wird initialisiert...",
             color=discord.Color.gold(),
         )
@@ -178,26 +178,26 @@ class Honigtopf(commands.Cog):
         await self.config.guild(ctx.guild).kicks.set(0)
 
         await self.update_honigtopf_message(ctx.guild)
-        await ctx.send(f"✅ Honigtopf wurde in {channel.mention} eingerichtet. Kicks werden ab jetzt gezählt.")
+        await ctx.send(f"✅ Honigtopf wurde in {channel.mention} eingerichtet.")
 
-    @commands.command(name="hhonigtopfupdate")
+    @commands.command(name="honigtopfupdate")
     @commands.admin_or_permissions(manage_guild=True)
-    async def hhonigtopfupdate(self, ctx):
+    async def honigtopfupdate(self, ctx):
         """Erzwingt ein manuelles Update der Honigtopf-Nachricht."""
         await self.update_honigtopf_message(ctx.guild)
         await ctx.send("✅ Honigtopf-Nachricht wurde aktualisiert.")
 
-    @commands.command(name="hhonigtopfreset")
+    @commands.command(name="honigtopfreset")
     @commands.admin_or_permissions(manage_guild=True)
-    async def hhonigtopfreset(self, ctx):
+    async def honigtopfreset(self, ctx):
         """Setzt den Kick-Zähler des Honigtopfs auf 0 zurück."""
         await self.config.guild(ctx.guild).kicks.set(0)
         await self.update_honigtopf_message(ctx.guild)
         await ctx.send("✅ Der Kick-Zähler wurde auf **0** zurückgesetzt.")
 
-    @commands.command(name="hhonigtopflog")
+    @commands.command(name="honigtopflog")
     @commands.admin_or_permissions(manage_guild=True)
-    async def hhonigtopflog(self, ctx, channel: discord.TextChannel = None):
+    async def honigtopflog(self, ctx, channel: discord.TextChannel = None):
         """Setzt einen Log-Kanal für Honigtopf-Aktionen."""
         if channel is None:
             await self.config.guild(ctx.guild).log_channel.set(None)
@@ -205,17 +205,17 @@ class Honigtopf(commands.Cog):
         await self.config.guild(ctx.guild).log_channel.set(channel.id)
         await ctx.send(f"✅ Log-Kanal auf {channel.mention} gesetzt.")
 
-    @commands.command(name="hhonigtopfhelp")
-    async def hhonigtopfhelp(self, ctx):
+    @commands.command(name="honigtopfhelp")
+    async def honigtopfhelp(self, ctx):
         """Zeigt die Honigtopf-Befehle an."""
         embed = discord.Embed(title="🍯 Honigtopf — Befehlsübersicht", color=discord.Color.gold())
         embed.add_field(
             name="⚙️ Setup",
             value=(
-                "`hhonigtopfsetup #kanal` — Honigtopf einrichten\n"
-                "`hhonigtopfupdate` — Nachricht manuell aktualisieren\n"
-                "`hhonigtopfreset` — Kick-Zähler auf 0 setzen\n"
-                "`hhonigtopflog #kanal` — Log-Kanal einrichten"
+                "`honigtopfsetup #kanal` — Honigtopf einrichten\n"
+                "`honigtopfupdate` — Nachricht manuell aktualisieren\n"
+                "`honigtopfreset` — Kick-Zähler auf 0 setzen\n"
+                "`honigtopflog #kanal` — Log-Kanal einrichten"
             ),
             inline=False,
         )
