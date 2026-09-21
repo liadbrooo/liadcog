@@ -1,10 +1,13 @@
 import discord
 import asyncio
+import logging
 from redbot.core import commands, Config
 from discord.ext import tasks
 from datetime import datetime, timezone
 
-# Prüfen, ob Discord Components V2 (discord.py >= 2.5.0) verfügbar ist
+log = logging.getLogger("red.teamlist")
+
+# Prüfen, ob Discord Components V2 verfügbar ist
 try:
     from discord.ui import LayoutView, Container, TextDisplay, Separator
     V2_AVAILABLE = True
@@ -24,15 +27,13 @@ class TeamList(commands.Cog):
             "message_id": None,
             "tracked_roles": [],
             "max_warns": 3,
-            "user_warns": {},          # {"user_id": anzahl_warns}
-            "team_admin_role": None,   # Rollen-ID, die Team-Befehle ausführen darf
-            "log_channel": None,       # Optionaler Log-Kanal
+            "user_warns": {},
+            "team_admin_role": None,
+            "log_channel": None,
         }
         self.config.register_guild(**default_guild)
 
-        # Für Rate-Limit-Schutz (Debounce)
         self._update_tasks = {}
-
         self.update_loop.start()
 
     def cog_unload(self):
@@ -47,13 +48,17 @@ class TeamList(commands.Cog):
         """Stündliches Update der Teamliste (Sicherheitsnetz)."""
         await self.bot.wait_until_red_ready()
         for guild in self.bot.guilds:
-            await self.update_message(guild)
+            try:
+                await self.update_message(guild)
+            except Exception as e:
+                log.exception(f"[TeamList] Update für Guild {guild.id} fehlgeschlagen: {e}")
 
     def _schedule_update(self, guild, delay=5.0):
         """Plant ein Update mit Debounce (schützt vor Rate-Limits)."""
         key = guild.id
-        if key in self._update_tasks and not self._update_tasks[key].done():
-            self._update_tasks[key].cancel()
+        old = self._update_tasks.get(key)
+        if old and not old.done():
+            old.cancel()
         self._update_tasks[key] = asyncio.create_task(self._delayed_update(guild, delay))
 
     async def _delayed_update(self, guild, delay):
@@ -62,38 +67,33 @@ class TeamList(commands.Cog):
             await self.update_message(guild)
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            log.exception(f"[TeamList] Delayed update fehlgeschlagen: {e}")
 
     # ---------------- LIVE-UPDATES ----------------
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
-        """Live-Update, wenn sich Rollen eines Mitglieds ändern."""
         if before.roles == after.roles:
             return
-
         tracked = await self.config.guild(after.guild).tracked_roles()
         if not tracked:
             return
-
         before_ids = {r.id for r in before.roles}
         after_ids = {r.id for r in after.roles}
         changed = before_ids.symmetric_difference(after_ids)
-
         if not (changed & set(tracked)):
             return
-
         self._schedule_update(after.guild)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
-        """Live-Update, wenn ein Mitglied den Server verlässt."""
         tracked = await self.config.guild(member.guild).tracked_roles()
         if any(r.id in tracked for r in member.roles):
             self._schedule_update(member.guild)
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        """Live-Update, wenn ein Mitglied joint (falls er Rollen mitbringt)."""
         tracked = await self.config.guild(member.guild).tracked_roles()
         if any(r.id in tracked for r in member.roles):
             self._schedule_update(member.guild)
@@ -106,17 +106,13 @@ class TeamList(commands.Cog):
         ratio = current / max_warns if max_warns else 0
 
         if ratio >= 1.0:
-            # Rot + Fett
-            return f"**```ansi\n\u001b[1;31m{text}\u001b[0m```**"
+            return f"**```ansi\n\u001b[1;31m{text}\u001b[0m```**"   # Rot + Fett
         elif ratio >= 0.6:
-            # Orange/Gelb
-            return f"```ansi\n\u001b[1;33m{text}\u001b[0m```"
+            return f"```ansi\n\u001b[1;33m{text}\u001b[0m```"        # Gelb/Orange
         elif ratio > 0:
-            # Grün (Warn vorhanden, aber unkritisch)
-            return f"```ansi\n\u001b[0;32m{text}\u001b[0m```"
+            return f"```ansi\n\u001b[0;32m{text}\u001b[0m```"        # Grün
         else:
-            # Neutral (0 Warns)
-            return f"**{text}**"
+            return f"**{text}**"                                      # Neutral
 
     async def _is_team_admin(self, ctx):
         """Prüft, ob der User Team-Befehle ausführen darf."""
@@ -126,12 +122,12 @@ class TeamList(commands.Cog):
             return True
         if ctx.author.guild_permissions.manage_guild:
             return True
-
         role_id = await self.config.guild(ctx.guild).team_admin_role()
         if role_id:
             return any(r.id == role_id for r in ctx.author.roles)
         return False
 
+    @staticmethod
     def _is_team_admin_check():
         """Decorator-Wrapper für den Check."""
         async def predicate(ctx):
@@ -158,7 +154,7 @@ class TeamList(commands.Cog):
             for role in roles:
                 if role in member.roles:
                     member_roles[role.id].append(member)
-                    break  # Nur die höchste Rolle
+                    break
 
         grouped = []
         for role in roles:
@@ -195,15 +191,21 @@ class TeamList(commands.Cog):
         message_id = await self.config.guild(guild).message_id()
 
         if not channel_id or not message_id:
+            log.warning(f"[TeamList] Kein Kanal/Nachricht für Guild {guild.id} konfiguriert.")
             return
 
         channel = guild.get_channel(channel_id)
         if not channel:
+            log.warning(f"[TeamList] Kanal {channel_id} nicht gefunden in Guild {guild.id}.")
             return
 
         try:
             message = await channel.fetch_message(message_id)
-        except (discord.NotFound, discord.Forbidden):
+        except discord.NotFound:
+            log.warning(f"[TeamList] Nachricht {message_id} nicht gefunden – wurde sie gelöscht?")
+            return
+        except discord.Forbidden:
+            log.warning(f"[TeamList] Keine Berechtigung, Nachricht {message_id} abzurufen.")
             return
 
         grouped = await self.get_grouped_team(guild)
@@ -211,42 +213,36 @@ class TeamList(commands.Cog):
         user_warns = await self.config.guild(guild).user_warns()
         timestamp = int(datetime.now(timezone.utc).timestamp())
 
+        # --- VERSUCH 1: Components V2 ---
         if V2_AVAILABLE:
-            await self._send_v2(message, grouped, max_warns, user_warns, timestamp)
-        else:
-            await self._send_embed(message, guild, timestamp)
+            try:
+                view = LayoutView()
+                container = Container(accent_color=discord.Color.blue())
 
-    async def _send_v2(self, message, grouped, max_warns, user_warns, timestamp):
-        """Erstellt die V2-Ansicht mit Container und Kategorien."""
-        view = LayoutView()
-        container = Container(accent_color=discord.Color.blue())
+                container.add_item(TextDisplay("## 📋 Teamliste"))
+                container.add_item(TextDisplay(f"-# Aktualisiert: <t:{timestamp}:R> • {len(grouped)} Kategorien"))
 
-        # Header
-        container.add_item(TextDisplay("## 📋 Teamliste"))
-        container.add_item(TextDisplay(f"-# Aktualisiert: <t:{timestamp}:R> • {len(grouped)} Kategorien"))
+                if not grouped:
+                    container.add_item(Separator())
+                    container.add_item(TextDisplay("Keine Teammitglieder in den konfigurierten Rollen gefunden."))
+                else:
+                    for role, members in grouped:
+                        container.add_item(Separator())
+                        container.add_item(TextDisplay(f"### 🏷️ {role.mention}  `({len(members)})`"))
+                        for member in members:
+                            warns = user_warns.get(str(member.id), 0)
+                            warn_text = self._format_warns(warns, max_warns)
+                            container.add_item(TextDisplay(f"➔ {member.mention} | Warns: {warn_text}"))
 
-        if not grouped:
-            container.add_item(Separator())
-            container.add_item(TextDisplay("Keine Teammitglieder in den konfigurierten Rollen gefunden."))
-        else:
-            for role, members in grouped:
-                container.add_item(Separator())
-                container.add_item(TextDisplay(f"### 🏷️ {role.mention}  `({len(members)})`"))
+                view.add_item(container)
 
-                for member in members:
-                    warns = user_warns.get(str(member.id), 0)
-                    warn_text = self._format_warns(warns, max_warns)
-                    container.add_item(TextDisplay(f"➔ {member.mention} | Warns: {warn_text}"))
+                # WICHTIG: embed=None + content=None entfernt alte Inhalte!
+                await message.edit(content=None, embed=None, view=view)
+                return
+            except Exception as e:
+                log.error(f"[TeamList] V2-Edit fehlgeschlagen, nutze Embed-Fallback: {type(e).__name__}: {e}")
 
-        view.add_item(container)
-
-        try:
-            await message.edit(view=view)
-        except discord.HTTPException:
-            pass
-
-    async def _send_embed(self, message, guild, timestamp):
-        """Fallback: Klassisches Embed."""
+        # --- FALLBACK: Klassisches Embed ---
         description = await self.generate_team_list(guild)
         if len(description) > 4000:
             description = description[:4000] + "\n... (Liste zu lang)"
@@ -257,9 +253,9 @@ class TeamList(commands.Cog):
             color=discord.Color.blue(),
         )
         try:
-            await message.edit(embed=embed)
-        except discord.HTTPException:
-            pass
+            await message.edit(content=None, embed=embed, view=None)
+        except Exception as e:
+            log.error(f"[TeamList] Auch Embed-Edit fehlgeschlagen: {type(e).__name__}: {e}")
 
     async def _log_action(self, guild, text):
         """Schreibt eine Aktion in den Log-Kanal."""
@@ -296,15 +292,11 @@ class TeamList(commands.Cog):
     @commands.command(name="tteamaddrole")
     @commands.admin_or_permissions(manage_guild=True)
     async def tteamaddrole(self, ctx, *roles: discord.Role):
-        """Fügt eine oder mehrere Rollen zur Teamliste hinzu.
-
-        Beispiel: tteamaddrole @Rolle1 @Rolle2 @Rolle3
-        """
+        """Fügt eine oder mehrere Rollen zur Teamliste hinzu."""
         if not roles:
             return await ctx.send("❌ Bitte gib mindestens eine Rolle an.\n**Beispiel:** `tteamaddrole @Rolle1 @Rolle2`")
 
-        added = []
-        already = []
+        added, already = [], []
         async with self.config.guild(ctx.guild).tracked_roles() as tracked:
             for role in roles:
                 if role.id not in tracked:
@@ -318,7 +310,6 @@ class TeamList(commands.Cog):
             msg.append(f"✅ **Hinzugefügt ({len(added)}):** {', '.join(added)}")
         if already:
             msg.append(f"⚠️ **Bereits vorhanden ({len(already)}):** {', '.join(already)}")
-
         await ctx.send("\n".join(msg))
         await self.update_message(ctx.guild)
 
@@ -329,8 +320,7 @@ class TeamList(commands.Cog):
         if not roles:
             return await ctx.send("❌ Bitte gib mindestens eine Rolle an.")
 
-        removed = []
-        not_found = []
+        removed, not_found = [], []
         async with self.config.guild(ctx.guild).tracked_roles() as tracked:
             for role in roles:
                 if role.id in tracked:
@@ -344,14 +334,13 @@ class TeamList(commands.Cog):
             msg.append(f"✅ **Entfernt ({len(removed)}):** {', '.join(removed)}")
         if not_found:
             msg.append(f"⚠️ **Nicht in der Liste ({len(not_found)}):** {', '.join(not_found)}")
-
         await ctx.send("\n".join(msg))
         await self.update_message(ctx.guild)
 
     @commands.command(name="tteamroles")
     @commands.admin_or_permissions(manage_guild=True)
     async def tteamroles(self, ctx):
-        """Zeigt alle aktuell konfigurierten Rollen (sortiert nach Hierarchie)."""
+        """Zeigt alle konfigurierten Rollen (sortiert nach Hierarchie)."""
         tracked = await self.config.guild(ctx.guild).tracked_roles()
         if not tracked:
             return await ctx.send("📋 Es sind noch keine Rollen konfiguriert.")
@@ -378,7 +367,7 @@ class TeamList(commands.Cog):
             return await ctx.send("❌ Es sind keine Rollen zum Löschen vorhanden.")
 
         await ctx.send(
-            f"⚠️ Willst du wirklich **alle {len(tracked)} Rollen** aus der Teamliste entfernen?\n"
+            f"⚠️ Willst du wirklich **alle {len(tracked)} Rollen** entfernen?\n"
             f"Antworte mit `ja` zum Bestätigen (30 Sekunden Zeit)."
         )
         try:
@@ -410,10 +399,7 @@ class TeamList(commands.Cog):
     @commands.command(name="tteamadminrole")
     @commands.admin_or_permissions(manage_guild=True)
     async def tteamadminrole(self, ctx, role: discord.Role = None):
-        """Setzt eine Rolle, die Team-Befehle ausführen darf.
-
-        Ohne Rollen-Angabe wird die Berechtigung entfernt.
-        """
+        """Setzt eine Rolle, die Team-Befehle ausführen darf."""
         if role is None:
             await self.config.guild(ctx.guild).team_admin_role.set(None)
             return await ctx.send("✅ Team-Admin-Rolle entfernt. Nur noch Admins können Team-Befehle nutzen.")
@@ -423,10 +409,7 @@ class TeamList(commands.Cog):
     @commands.command(name="tteamlogchannel")
     @commands.admin_or_permissions(manage_guild=True)
     async def tteamlogchannel(self, ctx, channel: discord.TextChannel = None):
-        """Setzt einen Log-Kanal für Team-Aktionen.
-
-        Ohne Kanal-Angabe wird der Log-Kanal entfernt.
-        """
+        """Setzt einen Log-Kanal für Team-Aktionen."""
         if channel is None:
             await self.config.guild(ctx.guild).log_channel.set(None)
             return await ctx.send("✅ Log-Kanal entfernt.")
@@ -447,10 +430,9 @@ class TeamList(commands.Cog):
 
         max_warns = await self.config.guild(ctx.guild).max_warns()
         await ctx.send(f"✅ {member.mention} hat jetzt **{new_total}/{max_warns}** Verwarnungen.\n📝 Grund: {grund}")
-
         await self._log_action(
             ctx.guild,
-            f"⚠️ **Warn** | {member.mention} wurde von {ctx.author.mention} verwarnt. "
+            f"⚠️ **Warn** | {member.mention} von {ctx.author.mention} | "
             f"({new_total}/{max_warns}) | Grund: {grund}"
         )
         await self.update_message(ctx.guild)
@@ -458,10 +440,7 @@ class TeamList(commands.Cog):
     @commands.command(name="tteamunwarn")
     @_is_team_admin_check()
     async def tteamunwarn(self, ctx, member: discord.Member, anzahl: int = 1):
-        """Entfernt einzelne Verwarnungen von einem Mitglied.
-
-        Beispiel: tteamunwarn @User 1
-        """
+        """Entfernt einzelne Verwarnungen von einem Mitglied."""
         async with self.config.guild(ctx.guild).user_warns() as warns:
             current = warns.get(str(member.id), 0)
             if current == 0:
@@ -474,10 +453,9 @@ class TeamList(commands.Cog):
 
         max_warns = await self.config.guild(ctx.guild).max_warns()
         await ctx.send(f"✅ {member.mention} hat jetzt **{new_total}/{max_warns}** Verwarnungen.")
-
         await self._log_action(
             ctx.guild,
-            f"✅ **Unwarn** | {ctx.author.mention} hat {anzahl} Warn(s) von {member.mention} entfernt. "
+            f"✅ **Unwarn** | {ctx.author.mention} entfernte {anzahl} Warn(s) von {member.mention} | "
             f"({new_total}/{max_warns})"
         )
         await self.update_message(ctx.guild)
@@ -491,7 +469,7 @@ class TeamList(commands.Cog):
                 del warns[str(member.id)]
                 await ctx.send(f"✅ Alle Verwarnungen von {member.mention} wurden zurückgesetzt.")
             else:
-                await ctx.send(f"❌ {member.mention} hat keine Verwarnungen.")
+                return await ctx.send(f"❌ {member.mention} hat keine Verwarnungen.")
 
         await self._log_action(
             ctx.guild,
@@ -525,10 +503,7 @@ class TeamList(commands.Cog):
     @commands.command(name="tteamhelp")
     async def tteamhelp(self, ctx):
         """Zeigt eine Übersicht aller Team-Befehle."""
-        embed = discord.Embed(
-            title="📋 TeamList — Befehlsübersicht",
-            color=discord.Color.blue(),
-        )
+        embed = discord.Embed(title="📋 TeamList — Befehlsübersicht", color=discord.Color.blue())
         embed.add_field(
             name="⚙️ Setup",
             value=(
@@ -559,11 +534,7 @@ class TeamList(commands.Cog):
             ),
             inline=False,
         )
-        embed.add_field(
-            name="🔄 Sonstiges",
-            value="`tteamupdate` — Manuelles Update der Liste",
-            inline=False,
-        )
+        embed.add_field(name="🔄 Sonstiges", value="`tteamupdate` — Manuelles Update der Liste", inline=False)
         await ctx.send(embed=embed)
 
 
