@@ -124,6 +124,7 @@ class Honigtopf(commands.Cog):
             await guild.unban(member, reason="Softban aufgehoben (Honigtopf)")
             punished = True
         except TypeError:
+            # Fallback für ältere discord.py Versionen
             try:
                 await member.ban(reason="Honigtopf ausgelöst (Softban)", delete_message_days=1)
                 await guild.unban(member, reason="Softban aufgehoben (Honigtopf)")
@@ -140,10 +141,10 @@ class Honigtopf(commands.Cog):
         if not punished:
             return
 
-        # 3. Zähler erhöhen
-        async with self.config.guild(guild).kicks() as kicks:
-            kicks += 1
-            new_kicks = kicks
+        # 3. Zähler erhöhen (GEFIXT: Explizites Auslesen und Speichern)
+        current_kicks = await self.config.guild(guild).kicks()
+        new_kicks = current_kicks + 1
+        await self.config.guild(guild).kicks.set(new_kicks)
 
         # 4. Nachricht aktualisieren
         await self.update_honigtopf_message(guild)
