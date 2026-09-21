@@ -2,7 +2,7 @@ import discord
 import logging
 from redbot.core import commands, Config
 
-log = logging.getLogger("red.honeypot")
+log = logging.getLogger("red.honigtopf")
 
 # Prüfen, ob Discord Components V2 verfügbar ist
 try:
@@ -12,21 +12,20 @@ except ImportError:
     V2_AVAILABLE = False
 
 
-class Honeypot(commands.Cog):
+class Honigtopf(commands.Cog):
     """Ein Honeypot-Kanal, der Spam-Bots fängt und bestraft."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0x484F4E45)  # HONE
+        self.config = Config.get_conf(self, identifier=0x484F4E45)
 
         default_guild = {
             "channel_id": None,
             "message_id": None,
             "kicks": 0,
+            "log_channel": None,
         }
         self.config.register_guild(**default_guild)
-
-    # ---------------- NACHRICHT GENERIEREN ----------------
 
     def get_honeypot_view(self, kicks):
         """Erstellt das cleane Container-Design für den Honeypot."""
@@ -44,7 +43,7 @@ class Honeypot(commands.Cog):
         ))
         main_container.add_item(Separator())
 
-        # Container 2: Kick-Zähler (Grauer Akzent, wie im Bild)
+        # Container 2: Kick-Zähler (Grauer Akzent)
         counter_container = Container(accent_color=discord.Color.dark_gray())
         counter_container.add_item(TextDisplay(f"🍯 **Kicks:** {kicks}"))
 
@@ -53,8 +52,8 @@ class Honeypot(commands.Cog):
 
         return view
 
-    async def update_honeypot_message(self, guild):
-        """Aktualisiert die Honeypot-Nachricht im Kanal."""
+    async def update_honigtopf_message(self, guild):
+        """Aktualisiert die Honigtopf-Nachricht im Kanal."""
         channel_id = await self.config.guild(guild).channel_id()
         message_id = await self.config.guild(guild).message_id()
         kicks = await self.config.guild(guild).kicks()
@@ -71,7 +70,7 @@ class Honeypot(commands.Cog):
         except discord.NotFound:
             return
         except discord.Forbidden:
-            log.warning(f"[Honeypot] Keine Berechtigung für Nachricht {message_id}.")
+            log.warning(f"[Honigtopf] Keine Berechtigung für Nachricht {message_id}.")
             return
 
         view = self.get_honeypot_view(kicks)
@@ -92,13 +91,11 @@ class Honeypot(commands.Cog):
                 embed.set_footer(text=f"🍯 Kicks: {kicks}")
                 await message.edit(content=None, embed=embed, view=None)
         except Exception as e:
-            log.error(f"[Honeypot] Fehler beim Editieren: {type(e).__name__}: {e}")
-
-    # ---------------- EVENT LISTENER ----------------
+            log.error(f"[Honigtopf] Fehler beim Editieren: {type(e).__name__}: {e}")
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        """Fängt Nachrichten im Honeypot-Kanal ab."""
+        """Fängt Nachrichten im Honigtopf-Kanal ab."""
         if message.author.bot or not message.guild:
             return
 
@@ -106,7 +103,6 @@ class Honeypot(commands.Cog):
         if message.channel.id != channel_id:
             return
 
-        # Admins und Moderatoren ignorieren (optional, aber empfohlen)
         if message.author.guild_permissions.administrator:
             return
 
@@ -116,23 +112,30 @@ class Honeypot(commands.Cog):
         except discord.Forbidden:
             pass
 
-        # 2. Bestrafung (Softban: Ban + Unban, um Nachrichten zu löschen)
+        # 2. Bestrafung (Softban)
         member = message.author
         guild = message.guild
         punished = False
 
         try:
-            # Softban-Logik (Ban mit 1 Tag Nachrichten-Löschung, dann Unban)
-            await member.ban(reason="Honeypot ausgelöst (Softban)", delete_message_days=1)
-            await guild.unban(member, reason="Softban aufgehoben (Honeypot)")
+            # Neuere discord.py Versionen nutzen delete_message_seconds
+            await member.ban(reason="Honigtopf ausgelöst (Softban)", delete_message_seconds=86400)
+            await guild.unban(member, reason="Softban aufgehoben (Honigtopf)")
             punished = True
-        except discord.Forbidden:
-            # Fallback: Kick, falls keine Ban-Rechte vorhanden sind
+        except TypeError:
+            # Fallback für ältere discord.py Versionen
             try:
-                await member.kick(reason="Honeypot ausgelöst (Kick-Fallback)")
+                await member.ban(reason="Honigtopf ausgelöst (Softban)", delete_message_days=1)
+                await guild.unban(member, reason="Softban aufgehoben (Honigtopf)")
                 punished = True
             except discord.Forbidden:
-                log.warning(f"[Honeypot] Keine Berechtigung, {member} zu bestrafen.")
+                pass
+        except discord.Forbidden:
+            try:
+                await member.kick(reason="Honigtopf ausgelöst (Kick-Fallback)")
+                punished = True
+            except discord.Forbidden:
+                log.warning(f"[Honigtopf] Keine Berechtigung, {member} zu bestrafen.")
 
         if not punished:
             return
@@ -143,26 +146,29 @@ class Honeypot(commands.Cog):
             new_kicks = kicks
 
         # 4. Nachricht aktualisieren
-        await self.update_honeypot_message(guild)
+        await self.update_honigtopf_message(guild)
 
-        # 5. Log-Nachricht (optional)
-        log_channel_id = await self.config.guild(guild).log_channel() if hasattr(self.config.guild(guild), 'log_channel') else None
-        # (Falls du einen Log-Kanal in der Config hast, kannst du hier loggen)
-        log.info(f"[Honeypot] {member} wurde wegen einer Nachricht im Honeypot-Kanal bestraft. Kicks: {new_kicks}")
+        # 5. Log-Nachricht senden
+        log_channel_id = await self.config.guild(guild).log_channel()
+        if log_channel_id:
+            log_channel = guild.get_channel(log_channel_id)
+            if log_channel:
+                try:
+                    await log_channel.send(f"🍯 **Honigtopf ausgelöst!** {member.mention} wurde gebannt. (Gesamt: {new_kicks})")
+                except discord.Forbidden:
+                    pass
+
+        log.info(f"[Honigtopf] {member} wurde bestraft. Kicks: {new_kicks}")
 
     # ---------------- COMMANDS (Präfix 'h') ----------------
 
-    @commands.command(name="hhoneypotsetup")
+    @commands.command(name="hhonigtopfsetup")
     @commands.admin_or_permissions(manage_guild=True)
-    async def hhoneypotsetup(self, ctx, channel: discord.TextChannel):
-        """Richtet den Honeypot-Kanal ein.
-
-        Beispiel: hhoneypotsetup #honeypot
-        """
-        # Sende die erste Nachricht (Initialisierung)
+    async def hhonigtopfsetup(self, ctx, channel: discord.TextChannel):
+        """Richtet den Honigtopf-Kanal ein."""
         embed = discord.Embed(
             title="⚠️ NICHT HIER SCHREIBEN ⚠️",
-            description="Der Honeypot wird initialisiert...",
+            description="Der Honigtopf wird initialisiert...",
             color=discord.Color.gold(),
         )
         msg = await channel.send(embed=embed)
@@ -171,40 +177,51 @@ class Honeypot(commands.Cog):
         await self.config.guild(ctx.guild).message_id.set(msg.id)
         await self.config.guild(ctx.guild).kicks.set(0)
 
-        await self.update_honeypot_message(ctx.guild)
-        await ctx.send(f"✅ Honeypot wurde in {channel.mention} eingerichtet. Kicks werden ab jetzt gezählt.")
+        await self.update_honigtopf_message(ctx.guild)
+        await ctx.send(f"✅ Honigtopf wurde in {channel.mention} eingerichtet. Kicks werden ab jetzt gezählt.")
 
-    @commands.command(name="hhoneypotupdate")
+    @commands.command(name="hhonigtopfupdate")
     @commands.admin_or_permissions(manage_guild=True)
-    async def hhoneypotupdate(self, ctx):
-        """Erzwingt ein manuelles Update der Honeypot-Nachricht."""
-        await self.update_honeypot_message(ctx.guild)
-        await ctx.send("✅ Honeypot-Nachricht wurde aktualisiert.")
+    async def hhonigtopfupdate(self, ctx):
+        """Erzwingt ein manuelles Update der Honigtopf-Nachricht."""
+        await self.update_honigtopf_message(ctx.guild)
+        await ctx.send("✅ Honigtopf-Nachricht wurde aktualisiert.")
 
-    @commands.command(name="hhoneypotreset")
+    @commands.command(name="hhonigtopfreset")
     @commands.admin_or_permissions(manage_guild=True)
-    async def hhoneypotreset(self, ctx):
-        """Setzt den Kick-Zähler des Honeypots auf 0 zurück."""
+    async def hhonigtopfreset(self, ctx):
+        """Setzt den Kick-Zähler des Honigtopfs auf 0 zurück."""
         await self.config.guild(ctx.guild).kicks.set(0)
-        await self.update_honeypot_message(ctx.guild)
+        await self.update_honigtopf_message(ctx.guild)
         await ctx.send("✅ Der Kick-Zähler wurde auf **0** zurückgesetzt.")
 
-    @commands.command(name="hhoneypothelp")
-    async def hhoneypothelp(self, ctx):
-        """Zeigt die Honeypot-Befehle an."""
-        embed = discord.Embed(title="🍯 Honeypot — Befehlsübersicht", color=discord.Color.gold())
+    @commands.command(name="hhonigtopflog")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def hhonigtopflog(self, ctx, channel: discord.TextChannel = None):
+        """Setzt einen Log-Kanal für Honigtopf-Aktionen."""
+        if channel is None:
+            await self.config.guild(ctx.guild).log_channel.set(None)
+            return await ctx.send("✅ Log-Kanal entfernt.")
+        await self.config.guild(ctx.guild).log_channel.set(channel.id)
+        await ctx.send(f"✅ Log-Kanal auf {channel.mention} gesetzt.")
+
+    @commands.command(name="hhonigtopfhelp")
+    async def hhonigtopfhelp(self, ctx):
+        """Zeigt die Honigtopf-Befehle an."""
+        embed = discord.Embed(title="🍯 Honigtopf — Befehlsübersicht", color=discord.Color.gold())
         embed.add_field(
             name="⚙️ Setup",
             value=(
-                "`hhoneypotsetup #kanal` — Honeypot einrichten\n"
-                "`hhoneypotupdate` — Nachricht manuell aktualisieren\n"
-                "`hhoneypotreset` — Kick-Zähler auf 0 setzen"
+                "`hhonigtopfsetup #kanal` — Honigtopf einrichten\n"
+                "`hhonigtopfupdate` — Nachricht manuell aktualisieren\n"
+                "`hhonigtopfreset` — Kick-Zähler auf 0 setzen\n"
+                "`hhonigtopflog #kanal` — Log-Kanal einrichten"
             ),
             inline=False,
         )
-        embed.set_footer(text="Jede Nachricht im Honeypot-Kanal führt zu einem Softban.")
+        embed.set_footer(text="Jede Nachricht im Honigtopf-Kanal führt zu einem Softban.")
         await ctx.send(embed=embed)
 
 
 async def setup(bot):
-    await bot.add_cog(Honeypot(bot))
+    await bot.add_cog(Honigtopf(bot))
