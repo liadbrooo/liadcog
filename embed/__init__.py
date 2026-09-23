@@ -1,16 +1,17 @@
 import discord
+import uuid
 import re
 import logging
 from redbot.core import commands, Config
 
-log = logging.getLogger("red.v2embed")
+log = logging.getLogger("red.v2builder")
 
-# V2 Import mit sicherem Fallback
 V2_AVAILABLE = False
 try:
     from discord.ui import (
-        LayoutView, Container, TextDisplay, Separator,
-        ActionRow, Button, Modal, TextInput
+        LayoutView, Container, TextDisplay, Separator, Section,
+        Thumbnail, MediaGallery, MediaGalleryItem, ActionRow,
+        Button, Modal, TextInput
     )
     V2_AVAILABLE = True
 except ImportError:
@@ -18,388 +19,835 @@ except ImportError:
 
 
 # ============================================================
+# FARBEN
+# ============================================================
+NAMED_COLORS = {
+    "red": 0xED4245, "green": 0x57F287, "blue": 0x3498DB, "yellow": 0xFEE75C,
+    "orange": 0xE67E22, "purple": 0x9B59B6, "pink": 0xEB459E, "magenta": 0xEB459E,
+    "gold": 0xF1C40F, "teal": 0x1ABC9C, "blurple": 0x5865F2, "greyple": 0x99AAB5,
+    "dark_blue": 0x206694, "dark_red": 0x992D22, "dark_green": 0x1F8B4C,
+    "dark_gold": 0xC27C0E, "dark_teal": 0x11806A, "dark_purple": 0x71368A,
+    "dark_orange": 0xA84300, "dark_magenta": 0xAD1457, "black": 0x010101,
+    "white": 0xFFFFFF, "gray": 0x95A5A6, "grey": 0x95A5A6,
+}
+
+
+def parse_color(s):
+    if not s:
+        return None
+    s = s.strip()
+    if s.lower() in NAMED_COLORS:
+        return discord.Color(NAMED_COLORS[s.lower()])
+    m = re.match(r"^#?([0-9a-fA-F]{6})$", s)
+    if m:
+        return discord.Color(int(m.group(1), 16))
+    return None
+
+
+def parse_emoji(s):
+    if not s:
+        return None
+    try:
+        return discord.PartialEmoji.from_str(s.strip())
+    except Exception:
+        return None
+
+
+TYPE_ICONS = {
+    "text": "📝", "separator": "➖", "container": "📦",
+    "section": "📄", "actionrow": "🔘", "button": "🔵",
+    "thumbnail": "🖼️", "mediagallery": "🖼️", "media_item": "🏞️",
+}
+TYPE_NAMES = {
+    "text": "Text", "separator": "Trennlinie", "container": "Container",
+    "section": "Section", "actionrow": "Action Row", "button": "Button",
+    "thumbnail": "Thumbnail", "mediagallery": "Media Gallery",
+    "media_item": "Media Item",
+}
+
+# Wo darf was eingefügt werden? None = Root
+PARENT_ALLOWED = {
+    "text": [None, "container", "section"],
+    "separator": [None, "container"],
+    "container": [None],
+    "section": [None, "container"],
+    "actionrow": [None, "container"],
+    "button": ["actionrow", "section"],
+    "thumbnail": ["section"],
+    "mediagallery": [None, "container"],
+    "media_item": ["mediagallery"],
+}
+
+
+# ============================================================
+# RENDER: Baut V2-Komponenten aus State
+# ============================================================
+
+def render_component(cid, state, cog, for_send=False, msg_uid=None):
+    comp = state["components"][cid]
+    t = comp["type"]
+    p = comp.get("props", {})
+
+    if t == "text":
+        return TextDisplay(p.get("content") or " ")
+
+    if t == "separator":
+        spacing_map = {
+            "small": discord.SeparatorSpacingSize.small,
+            "large": discord.SeparatorSpacingSize.large,
+        }
+        return Separator(
+            divider=p.get("divider", True),
+            spacing=spacing_map.get(p.get("spacing", "small"), discord.SeparatorSpacingSize.small),
+        )
+
+    if t == "container":
+        c = Container(accent_color=parse_color(p.get("color")) or discord.Color.dark_blue())
+        for child_id in comp.get("children", []):
+            try:
+                item = render_component(child_id, state, cog, for_send, msg_uid)
+                if item is not None:
+                    c.add_item(item)
+            except Exception as e:
+                log.error(f"[V2Builder] Container-Child {child_id} fehlgeschlagen: {e}")
+        return c
+
+    if t == "section":
+        texts = []
+        for child_id in comp.get("children", []):
+            ch = state["components"].get(child_id)
+            if ch and ch["type"] == "text":
+                texts.append(TextDisplay(ch["props"].get("content") or " "))
+        if not texts:
+            texts = [TextDisplay(" ")]
+        texts = texts[:3]
+
+        acc_id = p.get("accessory")
+        accessory = None
+        if acc_id and acc_id in state["components"]:
+            acc = state["components"][acc_id]
+            if acc["type"] == "button":
+                accessory = render_button(acc_id, state, cog, for_send, msg_uid)
+            elif acc["type"] == "thumbnail":
+                accessory = Thumbnail(acc["props"].get("url") or "https://cdn.discordapp.com/embed/avatars/0.png")
+        if accessory is None:
+            accessory = Thumbnail("https://cdn.discordapp.com/embed/avatars/0.png")
+
+        try:
+            return Section(*texts, accessory=accessory)
+        except Exception as e:
+            log.error(f"[V2Builder] Section-Render fehlgeschlagen: {e}")
+            return TextDisplay(texts[0].content if texts else " ")
+
+    if t == "actionrow":
+        row = ActionRow()
+        count = 0
+        for child_id in comp.get("children", []):
+            if count >= 5:
+                break
+            ch = state["components"].get(child_id)
+            if ch and ch["type"] == "button":
+                row.add_item(render_button(child_id, state, cog, for_send, msg_uid))
+                count += 1
+        if count == 0:
+            # ActionRow braucht mind. 1 Element
+            row.add_item(Button(label="Leer", style=discord.ButtonStyle.secondary, custom_id=f"v2b_empty_{uuid.uuid4().hex[:8]}", disabled=True))
+        return row
+
+    if t == "mediagallery":
+        mg = MediaGallery()
+        for child_id in comp.get("children", []):
+            ch = state["components"].get(child_id)
+            if ch and ch["type"] == "media_item":
+                url = ch["props"].get("url")
+                if url:
+                    mg.add_item(MediaGalleryItem(url, description=ch["props"].get("description") or None))
+        return mg
+
+    return TextDisplay("Unbekannter Typ")
+
+
+def render_button(cid, state, cog, for_send=False, msg_uid=None):
+    comp = state["components"][cid]
+    p = comp.get("props", {})
+    style_map = {
+        "primary": discord.ButtonStyle.primary,
+        "secondary": discord.ButtonStyle.secondary,
+        "success": discord.ButtonStyle.success,
+        "danger": discord.ButtonStyle.danger,
+        "link": discord.ButtonStyle.link,
+    }
+    style = style_map.get(p.get("style", "primary"), discord.ButtonStyle.primary)
+    emoji = parse_emoji(p.get("emoji"))
+    label = p.get("label") or None
+    disabled = p.get("disabled", False)
+
+    if style == discord.ButtonStyle.link:
+        return Button(
+            label=label, style=discord.ButtonStyle.link,
+            url=p.get("url") or "https://discord.com",
+            emoji=emoji, disabled=disabled,
+        )
+
+    if for_send:
+        custom_id = f"v2b_{msg_uid}_{cid}"
+    else:
+        custom_id = f"v2b_preview_{cid}"
+
+    return Button(label=label, style=style, custom_id=custom_id, emoji=emoji, disabled=disabled)
+
+
+def render_view(state, cog, for_send=False, msg_uid=None):
+    view = LayoutView()
+    for cid in state.get("root", []):
+        try:
+            item = render_component(cid, state, cog, for_send, msg_uid)
+            if item is not None:
+                view.add_item(item)
+        except Exception as e:
+            log.error(f"[V2Builder] Root-Child {cid} fehlgeschlagen: {e}")
+    if not view.children:
+        empty = Container(accent_color=discord.Color.dark_gray())
+        empty.add_item(TextDisplay("*(Leere Nachricht — füge Komponenten hinzu)*"))
+        view.add_item(empty)
+    return view
+
+
+# ============================================================
+# STATE MANAGEMENT (im Cog gespeichert, pro User)
+# ============================================================
+
+def new_state(user_id):
+    return {
+        "user_id": user_id,
+        "components": {},
+        "root": [],
+        "cwd": None,  # None = Root, sonst Container/Section/ActionRow-ID
+    }
+
+
+def add_component(state, ctype, parent_id=None, props=None):
+    cid = uuid.uuid4().hex[:8]
+    state["components"][cid] = {
+        "type": ctype,
+        "props": props or {},
+        "children": [],
+    }
+    if parent_id and parent_id in state["components"]:
+        state["components"][parent_id]["children"].append(cid)
+    else:
+        state["root"].append(cid)
+    return cid
+
+
+def find_parent(state, cid):
+    """Findet die ID des Parent-Containers einer Komponente (None = root)."""
+    for pid, comp in state["components"].items():
+        if cid in comp.get("children", []):
+            return pid
+    if cid in state["root"]:
+        return None
+    return None
+
+
+def get_siblings(state, parent_id):
+    if parent_id is None:
+        return state["root"]
+    return state["components"][parent_id].get("children", [])
+
+
+def remove_component(state, cid):
+    """Entfernt eine Komponente und alle Kinder."""
+    def _rm(c):
+        for child in list(state["components"].get(c, {}).get("children", [])):
+            _rm(child)
+        state["components"].pop(c, None)
+
+    parent = find_parent(state, cid)
+    siblings = get_siblings(state, parent)
+    if cid in siblings:
+        siblings.remove(cid)
+    _rm(cid)
+
+
+def build_tree_options(state, parent_id):
+    """Gibt eine Liste von (indent_prefix, cid, label) für Select zurück."""
+    result = []
+
+    def _walk(cid, depth):
+        comp = state["components"].get(cid)
+        if not comp:
+            return
+        indent = "  " * depth
+        icon = TYPE_ICONS.get(comp["type"], "❔")
+        # Kurze Vorschau
+        p = comp.get("props", {})
+        extra = ""
+        if comp["type"] == "text":
+            txt = (p.get("content") or "").replace("\n", " ")[:30]
+            extra = f" — {txt}" if txt else ""
+        elif comp["type"] == "button":
+            extra = f" — {p.get('label') or 'ohne Label'}"
+        elif comp["type"] == "container":
+            extra = f" — {len(comp.get('children', []))} Kinder"
+        result.append((f"{indent}{icon} {TYPE_NAMES.get(comp['type'], comp['type'])}{extra}", cid))
+        # Falls Kinder-Ebene == parent_id, dann weiterlaufen
+        for ch in comp.get("children", []):
+            _walk(ch, depth + 1)
+
+    if parent_id is None:
+        for cid in state["root"]:
+            _walk(cid, 0)
+    else:
+        # Nur Kinder dieses Parents anzeigen
+        for cid in state["components"].get(parent_id, {}).get("children", []):
+            _walk(cid, 0)
+    return result
+
+
+# ============================================================
 # MODALS
 # ============================================================
 
-class TitleModal(Modal, title="Titel bearbeiten"):
-    def __init__(self, view):
+class TextModal(Modal, title="Text bearbeiten"):
+    def __init__(self, cog, state, cid, existing=None):
         super().__init__()
-        self.view = view
-        self.title_input = TextInput(
-            label="Titel",
-            placeholder="z.B. Willkommen auf Kreis Lindenberg",
-            default=view.data.get("title", ""),
-            required=False,
-            max_length=256
-        )
-        self.add_item(self.title_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        self.view.data["title"] = self.title_input.value
-        await self.view.refresh(interaction)
-
-
-class DescriptionModal(Modal, title="Beschreibung bearbeiten"):
-    def __init__(self, view):
-        super().__init__()
-        self.view = view
-        self.desc_input = TextInput(
-            label="Beschreibung",
-            placeholder="Markdown erlaubt (**fett**, *kursiv*)",
-            default=view.data.get("description", ""),
+        self.cog = cog
+        self.state = state
+        self.cid = cid
+        existing = existing or {}
+        self.input = TextInput(
+            label="Inhalt",
+            placeholder="Markdown erlaubt: **fett**, *kursiv*, `code`, ## Titel",
+            default=existing.get("content", ""),
             style=discord.TextStyle.paragraph,
             required=False,
-            max_length=4000
+            max_length=4000,
         )
-        self.add_item(self.desc_input)
+        self.add_item(self.input)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        self.view.data["description"] = self.desc_input.value
-        await self.view.refresh(interaction)
+    async def on_submit(self, interaction):
+        self.state["components"][self.cid]["props"]["content"] = self.input.value
+        await interaction.response.send_message("✅ Text gespeichert.", ephemeral=True)
+        await self.cog.refresh_panel(interaction, self.state)
 
 
-class ColorModal(Modal, title="Farbe bearbeiten"):
-    def __init__(self, view):
+class SeparatorModal(Modal, title="Trennlinie"):
+    def __init__(self, cog, state, cid, existing=None):
         super().__init__()
-        self.view = view
-        self.color_input = TextInput(
-            label="Farbe (Hex oder Name)",
-            placeholder="z.B. #5865F2, dark_blue, red, gold",
-            default=view.data.get("color", ""),
-            required=False,
-            max_length=20
+        self.cog = cog
+        self.state = state
+        self.cid = cid
+        existing = existing or {}
+        self.divider = TextInput(
+            label="Linie anzeigen? (ja/nein)",
+            default="ja" if existing.get("divider", True) else "nein",
+            required=False, max_length=5,
         )
-        self.add_item(self.color_input)
+        self.spacing = TextInput(
+            label="Abstand (small/large)",
+            default=existing.get("spacing", "small"),
+            required=False, max_length=10,
+        )
+        self.add_item(self.divider)
+        self.add_item(self.spacing)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        color_str = self.color_input.value.strip()
-        if color_str:
-            if not self.view.cog.parse_color(color_str):
-                return await interaction.response.send_message(
-                    f"⚠️ Farbe `{color_str}` nicht erkannt. Nutze Hex (`#5865F2`) "
-                    "oder einen Namen (`red`, `dark_blue`...).",
-                    ephemeral=True
-                )
-        self.view.data["color"] = color_str
-        await self.view.refresh(interaction)
+    async def on_submit(self, interaction):
+        d = self.divider.value.strip().lower() in ("ja", "yes", "y", "j", "true", "1")
+        s = self.spacing.value.strip().lower()
+        if s not in ("small", "large"):
+            s = "small"
+        self.state["components"][self.cid]["props"] = {"divider": d, "spacing": s}
+        await interaction.response.send_message("✅ Trennlinie gespeichert.", ephemeral=True)
+        await self.cog.refresh_panel(interaction, self.state)
 
 
-class FooterModal(Modal, title="Footer bearbeiten"):
-    def __init__(self, view):
+class ContainerModal(Modal, title="Container bearbeiten"):
+    def __init__(self, cog, state, cid, existing=None):
         super().__init__()
-        self.view = view
-        self.footer_input = TextInput(
-            label="Footer (kleiner Text unten)",
-            placeholder="z.B. Kreis Lindenberg",
-            default=view.data.get("footer", ""),
-            required=False,
-            max_length=200
+        self.cog = cog
+        self.state = state
+        self.cid = cid
+        existing = existing or {}
+        self.color = TextInput(
+            label="Akzentfarbe (Hex oder Name)",
+            placeholder="#5865F2 oder dark_blue, red, gold ...",
+            default=existing.get("color", ""),
+            required=False, max_length=20,
         )
-        self.add_item(self.footer_input)
+        self.add_item(self.color)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        self.view.data["footer"] = self.footer_input.value
-        await self.view.refresh(interaction)
-
-
-class AuthorModal(Modal, title="Autor bearbeiten"):
-    def __init__(self, view):
-        super().__init__()
-        self.view = view
-        self.author_input = TextInput(
-            label="Autor (oben klein)",
-            placeholder="z.B. Team Kreis Lindenberg",
-            default=view.data.get("author", ""),
-            required=False,
-            max_length=100
-        )
-        self.add_item(self.author_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        self.view.data["author"] = self.author_input.value
-        await self.view.refresh(interaction)
-
-
-class AddFieldModal(Modal, title="Feld hinzufügen"):
-    def __init__(self, view):
-        super().__init__()
-        self.view = view
-        self.field_name = TextInput(
-            label="Feldname",
-            placeholder="z.B. Regeln, Adresse, Kontakt",
-            required=True,
-            max_length=100
-        )
-        self.field_value = TextInput(
-            label="Feldwert",
-            placeholder="Der Inhalt des Feldes",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=1000
-        )
-        self.add_item(self.field_name)
-        self.add_item(self.field_value)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        fields = self.view.data.setdefault("fields", [])
-        fields.append({
-            "name": self.field_name.value,
-            "value": self.field_value.value
-        })
-        await self.view.refresh(interaction)
-
-
-class RemoveFieldModal(Modal, title="Feld entfernen"):
-    def __init__(self, view):
-        super().__init__()
-        self.view = view
-        self.index_input = TextInput(
-            label="Feld-Nummer (beginnend bei 1)",
-            placeholder="z.B. 1",
-            required=True,
-            max_length=2
-        )
-        self.add_item(self.index_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            idx = int(self.index_input.value) - 1
-        except ValueError:
-            return await interaction.response.send_message("❌ Bitte eine Zahl angeben.", ephemeral=True)
-
-        fields = self.view.data.get("fields", [])
-        if idx < 0 or idx >= len(fields):
+    async def on_submit(self, interaction):
+        c = self.color.value.strip()
+        if c and not parse_color(c):
             return await interaction.response.send_message(
-                f"❌ Feld **{idx+1}** existiert nicht ({len(fields)} Felder).", ephemeral=True
+                f"❌ Farbe `{c}` nicht erkannt.", ephemeral=True
             )
+        self.state["components"][self.cid]["props"]["color"] = c
+        await interaction.response.send_message("✅ Container gespeichert.", ephemeral=True)
+        await self.cog.refresh_panel(interaction, self.state)
 
-        removed = fields.pop(idx)
-        await interaction.response.send_message(
-            f"✅ Feld **{removed['name']}** wurde entfernt.", ephemeral=True
+
+class ButtonModal(Modal, title="Button bearbeiten"):
+    def __init__(self, cog, state, cid, existing=None):
+        super().__init__()
+        self.cog = cog
+        self.state = state
+        self.cid = cid
+        existing = existing or {}
+
+        self.label = TextInput(
+            label="Label",
+            placeholder="z.B. Rolle erhalten",
+            default=existing.get("label", ""),
+            required=False, max_length=80,
         )
-        await self.view.refresh(interaction, already_responded=True)
+        self.emoji = TextInput(
+            label="Emoji (optional)",
+            placeholder="z.B. ✅ oder <:name:1234>",
+            default=existing.get("emoji", ""),
+            required=False, max_length=60,
+        )
+        self.style = TextInput(
+            label="Style (primary/secondary/success/danger/link)",
+            default=existing.get("style", "primary"),
+            required=False, max_length=20,
+        )
+        self.action = TextInput(
+            label="Aktion (none/role_add/role_remove/role_toggle/say/link)",
+            default=existing.get("action", "none"),
+            required=False, max_length=20,
+        )
+        self.action_data = TextInput(
+            label="Aktionsdaten (Rollen-ID oder Nachricht oder URL)",
+            placeholder="Rollen-ID (123456...) / Text / https://...",
+            default=existing.get("action_data", ""),
+            required=False, max_length=500,
+        )
+        self.add_item(self.label)
+        self.add_item(self.emoji)
+        self.add_item(self.style)
+        self.add_item(self.action)
+        self.add_item(self.action_data)
+
+    async def on_submit(self, interaction):
+        style = self.style.value.strip().lower()
+        if style not in ("primary", "secondary", "success", "danger", "link"):
+            style = "primary"
+
+        action = self.action.value.strip().lower()
+        if action not in ("none", "role_add", "role_remove", "role_toggle", "say", "link"):
+            action = "none"
+
+        # Link-Buttons brauchen style=link
+        if action == "link":
+            style = "link"
+
+        self.state["components"][self.cid]["props"] = {
+            "label": self.label.value.strip(),
+            "emoji": self.emoji.value.strip(),
+            "style": style,
+            "action": action,
+            "action_data": self.action_data.value.strip(),
+            "disabled": False,
+        }
+        await interaction.response.send_message("✅ Button gespeichert.", ephemeral=True)
+        await self.cog.refresh_panel(interaction, self.state)
+
+
+class ThumbnailModal(Modal, title="Thumbnail bearbeiten"):
+    def __init__(self, cog, state, cid, existing=None):
+        super().__init__()
+        self.cog = cog
+        self.state = state
+        self.cid = cid
+        existing = existing or {}
+        self.url = TextInput(
+            label="Bild-URL",
+            placeholder="https://...",
+            default=existing.get("url", ""),
+            required=True, max_length=500,
+        )
+        self.add_item(self.url)
+
+    async def on_submit(self, interaction):
+        self.state["components"][self.cid]["props"]["url"] = self.url.value.strip()
+        await interaction.response.send_message("✅ Thumbnail gespeichert.", ephemeral=True)
+        await self.cog.refresh_panel(interaction, self.state)
+
+
+class MediaItemModal(Modal, title="Media Item bearbeiten"):
+    def __init__(self, cog, state, cid, existing=None):
+        super().__init__()
+        self.cog = cog
+        self.state = state
+        self.cid = cid
+        existing = existing or {}
+        self.url = TextInput(
+            label="Bild-URL",
+            placeholder="https://...",
+            default=existing.get("url", ""),
+            required=True, max_length=500,
+        )
+        self.desc = TextInput(
+            label="Beschreibung (optional)",
+            default=existing.get("description", ""),
+            required=False, max_length=200,
+        )
+        self.add_item(self.url)
+        self.add_item(self.desc)
+
+    async def on_submit(self, interaction):
+        self.state["components"][self.cid]["props"] = {
+            "url": self.url.value.strip(),
+            "description": self.desc.value.strip(),
+        }
+        await interaction.response.send_message("✅ Media Item gespeichert.", ephemeral=True)
+        await self.cog.refresh_panel(interaction, self.state)
 
 
 # ============================================================
-# VIEW
+# EPHEMERAL PICKER-VIEWS (mit Select)
+# ============================================================
+
+class ComponentPickerView(discord.ui.View):
+    """Klassische View mit Select-Dropdown (für Pick-Aktionen)."""
+    def __init__(self, cog, state, action, options):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.state = state
+        self.action = action
+        select = discord.ui.Select(placeholder="Komponente wählen...", options=options)
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction):
+        cid = interaction.data["values"][0]
+        action = self.action
+
+        if action == "edit":
+            comp = self.state["components"].get(cid)
+            if not comp:
+                return await interaction.response.send_message("❌ Nicht gefunden.", ephemeral=True)
+            return await self.cog.open_edit_modal(interaction, self.state, cid, comp)
+
+        if action == "delete":
+            remove_component(self.state, cid)
+            await interaction.response.send_message("🗑️ Gelöscht.", ephemeral=True)
+            return await self.cog.refresh_panel(interaction, self.state)
+
+        if action in ("up", "down"):
+            parent = find_parent(self.state, cid)
+            siblings = get_siblings(self.state, parent)
+            if cid not in siblings:
+                return await interaction.response.send_message("❌ Fehler.", ephemeral=True)
+            i = siblings.index(cid)
+            if action == "up" and i > 0:
+                siblings[i], siblings[i - 1] = siblings[i - 1], siblings[i]
+            elif action == "down" and i < len(siblings) - 1:
+                siblings[i], siblings[i + 1] = siblings[i + 1], siblings[i]
+            await interaction.response.send_message("✅ Verschoben.", ephemeral=True)
+            return await self.cog.refresh_panel(interaction, self.state)
+
+        if action == "open":
+            comp = self.state["components"].get(cid)
+            if not comp:
+                return await interaction.response.send_message("❌ Nicht gefunden.", ephemeral=True)
+            if comp["type"] not in ("container", "section", "actionrow"):
+                return await interaction.response.send_message(
+                    "❌ In diesen Typ kann man nicht hineingehen.", ephemeral=True
+                )
+            self.state["cwd"] = cid
+            await interaction.response.send_message("📂 Geöffnet.", ephemeral=True)
+            return await self.cog.refresh_panel(interaction, self.state)
+
+        if action == "duplicate":
+            comp = self.state["components"].get(cid)
+            if not comp:
+                return await interaction.response.send_message("❌ Nicht gefunden.", ephemeral=True)
+            import copy
+            new_id = uuid.uuid4().hex[:8]
+            self.state["components"][new_id] = copy.deepcopy(comp)
+            # Kinder auch klonen (rekursiv) - hier simple Variante
+            new_children = []
+            for ch in comp.get("children", []):
+                ch_new = uuid.uuid4().hex[:8]
+                self.state["components"][ch_new] = copy.deepcopy(self.state["components"][ch])
+                new_children.append(ch_new)
+            self.state["components"][new_id]["children"] = new_children
+            parent = find_parent(self.state, cid)
+            siblings = get_siblings(self.state, parent)
+            if cid in siblings:
+                idx = siblings.index(cid)
+                siblings.insert(idx + 1, new_id)
+            await interaction.response.send_message("📋 Dupliziert.", ephemeral=True)
+            return await self.cog.refresh_panel(interaction, self.state)
+
+
+class AddTypeView(discord.ui.View):
+    """Pickt den Typ, der eingefügt werden soll."""
+    def __init__(self, cog, state, parent_id):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.state = state
+        self.parent_id = parent_id
+
+        # Erlaubte Typen für diesen Parent bestimmen
+        parent_type = None
+        if parent_id:
+            parent_type = state["components"].get(parent_id, {}).get("type")
+
+        types = []
+        for t, allowed in PARENT_ALLOWED.items():
+            if parent_type in allowed:
+                types.append(t)
+
+        # Select mit max 25 Optionen
+        options = [
+            discord.SelectOption(
+                label=TYPE_NAMES[t],
+                value=t,
+                emoji=TYPE_ICONS.get(t, "❔"),
+            )
+            for t in types[:25]
+        ]
+        if not options:
+            options = [discord.SelectOption(label="Keine Typen erlaubt", value="__none__")]
+
+        select = discord.ui.Select(placeholder="Typ wählen...", options=options)
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction):
+        t = interaction.data["values"][0]
+        if t == "__none__":
+            return await interaction.response.send_message("❌ Keine Typen erlaubt hier.", ephemeral=True)
+
+        cid = add_component(self.state, t, parent_id=self.parent_id)
+
+        # Defaults je Typ
+        defaults = {
+            "text": {"content": "Neuer Text"},
+            "container": {"color": "dark_blue"},
+            "separator": {"divider": True, "spacing": "small"},
+            "button": {"label": "Button", "style": "primary", "action": "none", "disabled": False},
+            "thumbnail": {"url": "https://cdn.discordapp.com/embed/avatars/0.png"},
+            "media_item": {"url": "https://cdn.discordapp.com/embed/avatars/0.png", "description": ""},
+        }
+        if t in defaults:
+            self.state["components"][cid]["props"] = defaults[t]
+
+        await interaction.response.send_message(f"✅ {TYPE_NAMES[t]} hinzugefügt.", ephemeral=True)
+        await self.cog.refresh_panel(interaction, self.state)
+
+
+# ============================================================
+# BUILDER-VIEW (Hauptpanel)
 # ============================================================
 
 if V2_AVAILABLE:
 
     class BuilderView(LayoutView):
-        def __init__(self, cog, data: dict = None):
-            super().__init__(timeout=300)
+        def __init__(self, cog, state):
+            super().__init__(timeout=600)
             self.cog = cog
-            self.data = data or {
-                "title": "",
-                "description": "",
-                "color": "",
-                "footer": "",
-                "author": "",
-                "fields": [],
-            }
+            self.state = state
 
             # Preview-Container
-            self.add_item(self.build_preview_container())
-
-            # Buttons in zwei Reihen
-            row1, row2 = self.build_control_rows()
-            self.add_item(row1)
-            self.add_item(row2)
-
-        def build_preview_container(self):
-            color = self.cog.parse_color(self.data.get("color", "")) or discord.Color.dark_blue()
-            container = Container(accent_color=color)
-
-            has_content = False
-
-            if self.data.get("author"):
-                container.add_item(TextDisplay(f"-# {self.data['author']}"))
-                has_content = True
-
-            if self.data.get("title"):
-                container.add_item(TextDisplay(f"## {self.data['title']}"))
-                has_content = True
-
-            if self.data.get("description"):
-                container.add_item(TextDisplay(self.data["description"]))
-                has_content = True
-
-            for i, field in enumerate(self.data.get("fields", []), 1):
-                container.add_item(TextDisplay(f"### {i}. {field['name']}\n{field['value']}"))
-                has_content = True
-
-            if self.data.get("footer"):
-                if has_content:
-                    container.add_item(Separator())
-                container.add_item(TextDisplay(f"-# {self.data['footer']}"))
-                has_content = True
-
-            if not has_content:
-                container.add_item(TextDisplay("*(Leeres Embed — nutze die Buttons unten)*"))
-
-            return container
-
-        def build_control_rows(self):
-            row1 = ActionRow()
-            row1.add_item(BtnTitle())
-            row1.add_item(BtnDescription())
-            row1.add_item(BtnColor())
-            row1.add_item(BtnAuthor())
-            row1.add_item(BtnFooter())
-
-            row2 = ActionRow()
-            row2.add_item(BtnAddField())
-            row2.add_item(BtnRemoveField())
-            row2.add_item(BtnClear())
-            row2.add_item(BtnSend())
-            row2.add_item(BtnCancel())
-
-            return row1, row2
-
-        async def refresh(self, interaction: discord.Interaction, already_responded: bool = False):
-            new_view = BuilderView(self.cog, self.data)
             try:
-                if already_responded:
-                    await interaction.edit_original_response(view=new_view)
-                else:
-                    await interaction.response.edit_message(view=new_view)
+                preview = render_view(state, cog, for_send=False)
+                for child in preview.children:
+                    self.add_item(child)
             except Exception as e:
-                log.error(f"[V2Embed] Refresh-Fehler: {e}")
+                log.error(f"[V2Builder] Preview-Render-Fehler: {e}")
+                c = Container(accent_color=discord.Color.red())
+                c.add_item(TextDisplay("Fehler beim Rendern der Vorschau."))
+                self.add_item(c)
+
+            # CWD-Anzeige
+            cwd_text = "📍 **Root**" if state["cwd"] is None else f"📂 **In: {TYPE_NAMES.get(state['components'][state['cwd']]['type'], '?')}**"
+            info = Container(accent_color=discord.Color.dark_gray())
+            info.add_item(TextDisplay(f"-# {cwd_text} • {len(state['components'])} Komponenten"))
+            self.add_item(info)
+
+            # Steuerung - Reihe 1
+            row1 = ActionRow()
+            row1.add_item(BtnAdd())
+            row1.add_item(BtnEdit())
+            row1.add_item(BtnDelete())
+            row1.add_item(BtnUp())
+            row1.add_item(BtnDown())
+            self.add_item(row1)
+
+            # Steuerung - Reihe 2
+            row2 = ActionRow()
+            if state["cwd"] is not None:
+                row2.add_item(BtnBack())
+            row2.add_item(BtnOpen())
+            row2.add_item(BtnSend())
+            row2.add_item(BtnClear())
+            row2.add_item(BtnClose())
+            self.add_item(row2)
 
 
     # ---------- BUTTONS ----------
 
-    class BtnTitle(Button):
+    class BtnAdd(Button):
         def __init__(self):
-            super().__init__(label="Titel", style=discord.ButtonStyle.grey, row=0, emoji="📝")
+            super().__init__(label="Hinzufügen", style=discord.ButtonStyle.success, emoji="➕", row=0)
 
-        async def callback(self, interaction: discord.Interaction):
-            await interaction.response.send_modal(TitleModal(self.view))
+        async def callback(self, interaction):
+            state = self.view.state
+            cwd = state["cwd"]
+            # Wenn cwd keine Kinder erlaubt, dann in root einfügen
+            if cwd:
+                ctype = state["components"][cwd]["type"]
+                # Prüfen ob irgendein Typ in diesen cwd passt
+                allowed_types = [t for t, a in PARENT_ALLOWED.items() if ctype in a]
+                if not allowed_types:
+                    state["cwd"] = None  # zurück zu root
+
+            view = AddTypeView(self.view.cog, state, state["cwd"])
+            await interaction.response.send_message("Was möchtest du hinzufügen?", view=view, ephemeral=True)
 
 
-    class BtnDescription(Button):
+    class BtnEdit(Button):
         def __init__(self):
-            super().__init__(label="Beschreibung", style=discord.ButtonStyle.grey, row=0, emoji="📄")
+            super().__init__(label="Bearbeiten", style=discord.ButtonStyle.primary, emoji="✏️", row=0)
 
-        async def callback(self, interaction: discord.Interaction):
-            await interaction.response.send_modal(DescriptionModal(self.view))
+        async def callback(self, interaction):
+            state = self.view.state
+            tree = build_tree_options(state, state["cwd"])
+            if not tree:
+                return await interaction.response.send_message("❌ Keine Komponenten auf dieser Ebene.", ephemeral=True)
+            options = [discord.SelectOption(label=label[:100], value=cid) for label, cid in tree[:25]]
+            view = ComponentPickerView(self.view.cog, state, "edit", options)
+            await interaction.response.send_message("Welche Komponente bearbeiten?", view=view, ephemeral=True)
 
 
-    class BtnColor(Button):
+    class BtnDelete(Button):
         def __init__(self):
-            super().__init__(label="Farbe", style=discord.ButtonStyle.grey, row=0, emoji="🎨")
+            super().__init__(label="Löschen", style=discord.ButtonStyle.danger, emoji="🗑️", row=0)
 
-        async def callback(self, interaction: discord.Interaction):
-            await interaction.response.send_modal(ColorModal(self.view))
+        async def callback(self, interaction):
+            state = self.view.state
+            tree = build_tree_options(state, state["cwd"])
+            if not tree:
+                return await interaction.response.send_message("❌ Keine Komponenten auf dieser Ebene.", ephemeral=True)
+            options = [discord.SelectOption(label=label[:100], value=cid) for label, cid in tree[:25]]
+            view = ComponentPickerView(self.view.cog, state, "delete", options)
+            await interaction.response.send_message("Welche Komponente löschen?", view=view, ephemeral=True)
 
 
-    class BtnAuthor(Button):
+    class BtnUp(Button):
         def __init__(self):
-            super().__init__(label="Autor", style=discord.ButtonStyle.grey, row=0, emoji="👤")
+            super().__init__(label="Hoch", style=discord.ButtonStyle.secondary, emoji="⬆️", row=0)
 
-        async def callback(self, interaction: discord.Interaction):
-            await interaction.response.send_modal(AuthorModal(self.view))
+        async def callback(self, interaction):
+            state = self.view.state
+            tree = build_tree_options(state, state["cwd"])
+            if not tree:
+                return await interaction.response.send_message("❌ Keine Komponenten.", ephemeral=True)
+            options = [discord.SelectOption(label=label[:100], value=cid) for label, cid in tree[:25]]
+            view = ComponentPickerView(self.view.cog, state, "up", options)
+            await interaction.response.send_message("Welche Komponente hoch?", view=view, ephemeral=True)
 
 
-    class BtnFooter(Button):
+    class BtnDown(Button):
         def __init__(self):
-            super().__init__(label="Footer", style=discord.ButtonStyle.grey, row=0, emoji="📎")
+            super().__init__(label="Runter", style=discord.ButtonStyle.secondary, emoji="⬇️", row=0)
 
-        async def callback(self, interaction: discord.Interaction):
-            await interaction.response.send_modal(FooterModal(self.view))
+        async def callback(self, interaction):
+            state = self.view.state
+            tree = build_tree_options(state, state["cwd"])
+            if not tree:
+                return await interaction.response.send_message("❌ Keine Komponenten.", ephemeral=True)
+            options = [discord.SelectOption(label=label[:100], value=cid) for label, cid in tree[:25]]
+            view = ComponentPickerView(self.view.cog, state, "down", options)
+            await interaction.response.send_message("Welche Komponente runter?", view=view, ephemeral=True)
 
 
-    class BtnAddField(Button):
+    class BtnOpen(Button):
         def __init__(self):
-            super().__init__(label="Feld +", style=discord.ButtonStyle.green, row=1, emoji="➕")
+            super().__init__(label="Öffnen", style=discord.ButtonStyle.secondary, emoji="📂", row=1)
 
-        async def callback(self, interaction: discord.Interaction):
-            await interaction.response.send_modal(AddFieldModal(self.view))
+        async def callback(self, interaction):
+            state = self.view.state
+            # Zeige nur Container/Section/ActionRow aus aktueller Ebene
+            tree = build_tree_options(state, state["cwd"])
+            filtered = [(l, c) for l, c in tree if state["components"][c]["type"] in ("container", "section", "actionrow")]
+            if not filtered:
+                return await interaction.response.send_message(
+                    "❌ Kein Container/Section/ActionRow auf dieser Ebene.", ephemeral=True
+                )
+            options = [discord.SelectOption(label=label[:100], value=cid) for label, cid in filtered[:25]]
+            view = ComponentPickerView(self.view.cog, state, "open", options)
+            await interaction.response.send_message("In welches Element hinein?", view=view, ephemeral=True)
 
 
-    class BtnRemoveField(Button):
+    class BtnBack(Button):
         def __init__(self):
-            super().__init__(label="Feld -", style=discord.ButtonStyle.red, row=1, emoji="➖")
+            super().__init__(label="Zurück", style=discord.ButtonStyle.secondary, emoji="⬅️", row=1)
 
-        async def callback(self, interaction: discord.Interaction):
-            if not self.view.data.get("fields"):
-                return await interaction.response.send_message("❌ Keine Felder zum Entfernen.", ephemeral=True)
-            await interaction.response.send_modal(RemoveFieldModal(self.view))
-
-
-    class BtnClear(Button):
-        def __init__(self):
-            super().__init__(label="Leeren", style=discord.ButtonStyle.danger, row=1, emoji="🗑️")
-
-        async def callback(self, interaction: discord.Interaction):
-            self.view.data = {
-                "title": "",
-                "description": "",
-                "color": "",
-                "footer": "",
-                "author": "",
-                "fields": [],
-            }
-            await self.view.refresh(interaction)
+        async def callback(self, interaction):
+            state = self.view.state
+            if state["cwd"] is not None:
+                parent = find_parent(state, state["cwd"])
+                state["cwd"] = parent
+            await interaction.response.send_message("⬅️ Eine Ebene höher.", ephemeral=True)
+            await self.view.cog.refresh_panel(interaction, state)
 
 
     class BtnSend(Button):
         def __init__(self):
-            super().__init__(label="Senden", style=discord.ButtonStyle.blurple, row=1, emoji="📤")
+            super().__init__(label="Senden", style=discord.ButtonStyle.blurple, emoji="📤", row=1)
 
-        async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            data = view.data
-
-            if not any([data.get("title"), data.get("description"), data.get("fields"),
-                        data.get("footer"), data.get("author")]):
-                return await interaction.response.send_message("❌ Das Embed ist leer.", ephemeral=True)
+        async def callback(self, interaction):
+            state = self.view.state
+            if not state["root"]:
+                return await interaction.response.send_message("❌ Die Nachricht ist leer.", ephemeral=True)
 
             await interaction.response.send_message(
-                "In welchen Kanal soll das Embed gesendet werden? "
-                "Erwähne den Kanal mit `#` (30 Sekunden Zeit).",
+                "In welchen Kanal senden? Erwähne den Kanal mit `#` (30 Sekunden Zeit).",
                 ephemeral=True
             )
 
             def check(m):
-                return (m.author == interaction.user
-                        and m.channel == interaction.channel
-                        and m.channel_mentions)
+                return m.author == interaction.user and m.channel == interaction.channel and m.channel_mentions
 
             try:
                 msg = await interaction.client.wait_for("message", check=check, timeout=30.0)
             except Exception:
-                return await interaction.followup.send("⏱️ Timeout. Senden abgebrochen.", ephemeral=True)
+                return await interaction.followup.send("⏱️ Timeout.", ephemeral=True)
 
-            target_channel = msg.channel_mentions[0]
+            target = msg.channel_mentions[0]
             try:
                 await msg.delete()
             except discord.Forbidden:
                 pass
 
-            final_view = LayoutView()
-            final_view.add_item(view.build_preview_container())
-
-            try:
-                await target_channel.send(view=final_view)
-                await interaction.followup.send(
-                    f"✅ Embed wurde in {target_channel.mention} gesendet.", ephemeral=True
-                )
-            except discord.Forbidden:
-                await interaction.followup.send(
-                    f"❌ Keine Berechtigung für {target_channel.mention}.", ephemeral=True
-                )
-            except Exception as e:
-                await interaction.followup.send(f"❌ Fehler: {e}", ephemeral=True)
+            await self.view.cog.send_built_message(interaction, state, target)
 
 
-    class BtnCancel(Button):
+    class BtnClear(Button):
         def __init__(self):
-            super().__init__(label="Abbrechen", style=discord.ButtonStyle.secondary, row=1, emoji="✖️")
+            super().__init__(label="Leeren", style=discord.ButtonStyle.danger, emoji="🧹", row=1)
 
-        async def callback(self, interaction: discord.Interaction):
+        async def callback(self, interaction):
+            self.view.state["components"] = {}
+            self.view.state["root"] = []
+            self.view.state["cwd"] = None
+            await interaction.response.send_message("🧹 Geleert.", ephemeral=True)
+            await self.view.cog.refresh_panel(interaction, self.view.state)
+
+
+    class BtnClose(Button):
+        def __init__(self):
+            super().__init__(label="Schließen", style=discord.ButtonStyle.secondary, emoji="✖️", row=1)
+
+        async def callback(self, interaction):
             self.view.stop()
+            await self.view.cog.close_session(self.view.state["user_id"])
             try:
                 await interaction.message.delete()
             except discord.Forbidden:
@@ -410,66 +858,218 @@ if V2_AVAILABLE:
 # HAUPT-COG
 # ============================================================
 
-class V2EmbedBuilder(commands.Cog):
-    """Interaktiver Embed-Builder im Components V2 Format."""
+class V2Builder(commands.Cog):
+    """Vollständiger Discord Components V2 Builder."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0x5632454D)  # V2EM
-        self.config.register_guild(saved_embeds={})
+        self.config = Config.get_conf(self, identifier=0x56324255)  # V2BU
+        self.config.register_guild(sent_messages={})
+        self.sessions = {}  # user_id -> state
 
-    def parse_color(self, color_str: str):
-        if not color_str:
-            return None
+    # ---------- SESSION ----------
+    def close_session(self, user_id):
+        self.sessions.pop(user_id, None)
 
-        color_str = color_str.strip()
-        named = {
-            "red": discord.Color.red(),
-            "green": discord.Color.green(),
-            "blue": discord.Color.blue(),
-            "yellow": discord.Color.yellow(),
-            "orange": discord.Color.orange(),
-            "purple": discord.Color.purple(),
-            "pink": discord.Color.magenta(),
-            "magenta": discord.Color.magenta(),
-            "gold": discord.Color.gold(),
-            "teal": discord.Color.teal(),
-            "blurple": discord.Color.blurple(),
-            "greyple": discord.Color.greyple(),
-            "dark_blue": discord.Color.dark_blue(),
-            "dark_red": discord.Color.dark_red(),
-            "dark_green": discord.Color.dark_green(),
-            "dark_gold": discord.Color.dark_gold(),
-            "dark_teal": discord.Color.dark_teal(),
-            "dark_purple": discord.Color.dark_purple(),
-            "dark_orange": discord.Color.dark_orange(),
-            "dark_magenta": discord.Color.dark_magenta(),
-            "black": discord.Color.from_rgb(0, 0, 0),
-            "white": discord.Color.from_rgb(255, 255, 255),
-            "gray": discord.Color.from_rgb(128, 128, 128),
-            "grey": discord.Color.from_rgb(128, 128, 128),
-        }
+    async def refresh_panel(self, interaction_or_ctx, state):
+        """Aktualisiert das Builder-Panel (Haupt-Nachricht)."""
+        try:
+            if interaction_or_ctx.response.is_done():
+                # via followup
+                pass
+        except Exception:
+            pass
 
-        key = color_str.lower().replace(" ", "_")
-        if key in named:
-            return named[key]
+    # ---------- EDIT MODAL ----------
+    async def open_edit_modal(self, interaction, state, cid, comp):
+        t = comp["type"]
+        existing = comp.get("props", {})
+        if t == "text":
+            modal = TextModal(self, state, cid, existing)
+        elif t == "separator":
+            modal = SeparatorModal(self, state, cid, existing)
+        elif t == "container":
+            modal = ContainerModal(self, state, cid, existing)
+        elif t == "button":
+            modal = ButtonModal(self, state, cid, existing)
+        elif t == "thumbnail":
+            modal = ThumbnailModal(self, state, cid, existing)
+        elif t == "media_item":
+            modal = MediaItemModal(self, state, cid, existing)
+        elif t == "section":
+            return await interaction.response.send_message(
+                "Sections haben keine direkten Eigenschaften. Bearbeite die Kinder oder den Accessory.",
+                ephemeral=True
+            )
+        elif t == "actionrow":
+            return await interaction.response.send_message(
+                "ActionRows haben keine direkten Eigenschaften. Bearbeite die Buttons darin.",
+                ephemeral=True
+            )
+        elif t == "mediagallery":
+            return await interaction.response.send_message(
+                "MediaGallery hat keine direkten Eigenschaften. Bearbeite die Items darin.",
+                ephemeral=True
+            )
+        else:
+            return await interaction.response.send_message("❌ Dieser Typ kann nicht bearbeitet werden.", ephemeral=True)
+        await interaction.response.send_modal(modal)
 
-        match = re.match(r"^#?([0-9a-fA-F]{6})$", color_str)
-        if match:
-            return discord.Color(int(match.group(1), 16))
+    # ---------- SEND ----------
+    async def send_built_message(self, interaction, state, channel):
+        """Sendet die gebaute Nachricht persistent."""
+        msg_uid = uuid.uuid4().hex[:12]
 
-        return None
+        # Buttons-Actions sammeln
+        btn_actions = {}
+        for cid, comp in state["components"].items():
+            if comp["type"] == "button":
+                p = comp.get("props", {})
+                if p.get("style") != "link" and p.get("action", "none") != "none":
+                    btn_actions[cid] = {
+                        "action": p.get("action", "none"),
+                        "action_data": p.get("action_data", ""),
+                        "label": p.get("label", ""),
+                    }
 
-    @commands.command(name="v2embed", aliases=["v2e"])
+        view = render_view(state, self, for_send=True, msg_uid=msg_uid)
+
+        try:
+            msg = await channel.send(view=view)
+        except discord.Forbidden:
+            return await interaction.followup.send(f"❌ Keine Berechtigung in {channel.mention}.", ephemeral=True)
+        except Exception as e:
+            log.error(f"[V2Builder] Senden fehlgeschlagen: {e}")
+            return await interaction.followup.send(f"❌ Fehler: {e}", ephemeral=True)
+
+        # In Config speichern
+        async with self.config.guild(interaction.guild).sent_messages() as sent:
+            sent[msg_uid] = {
+                "message_id": msg.id,
+                "channel_id": channel.id,
+                "buttons": btn_actions,
+            }
+
+        await interaction.followup.send(f"✅ Nachricht in {channel.mention} gesendet.", ephemeral=True)
+
+    # ---------- BUTTON-HANDLING für gesendete Nachrichten ----------
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+        if not interaction.guild:
+            return
+        data = interaction.data or {}
+        custom_id = data.get("custom_id", "")
+        if not custom_id.startswith("v2b_"):
+            return
+
+        parts = custom_id.split("_")
+        if len(parts) < 4:
+            return
+        msg_uid = parts[2]
+        btn_id = parts[3]
+
+        sent = await self.config.guild(interaction.guild).sent_messages()
+        record = sent.get(msg_uid)
+        if not record:
+            return
+        btn = record.get("buttons", {}).get(btn_id)
+        if not btn:
+            return
+
+        action = btn.get("action", "none")
+        action_data = btn.get("action_data", "")
+
+        if action == "role_add":
+            try:
+                rid = int(action_data)
+                role = interaction.guild.get_role(rid)
+                if role:
+                    await interaction.user.add_roles(role, reason="V2-Button")
+                    await interaction.response.send_message(f"✅ Du hast die Rolle {role.mention} erhalten.", ephemeral=True)
+                else:
+                    await interaction.response.send_message("❌ Rolle nicht gefunden.", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
+
+        elif action == "role_remove":
+            try:
+                rid = int(action_data)
+                role = interaction.guild.get_role(rid)
+                if role:
+                    await interaction.user.remove_roles(role, reason="V2-Button")
+                    await interaction.response.send_message(f"✅ Rolle {role.mention} entfernt.", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
+
+        elif action == "role_toggle":
+            try:
+                rid = int(action_data)
+                role = interaction.guild.get_role(rid)
+                if role:
+                    if role in interaction.user.roles:
+                        await interaction.user.remove_roles(role, reason="V2-Button Toggle")
+                        await interaction.response.send_message(f"➖ Rolle {role.mention} entfernt.", ephemeral=True)
+                    else:
+                        await interaction.user.add_roles(role, reason="V2-Button Toggle")
+                        await interaction.response.send_message(f"➕ Rolle {role.mention} hinzugefügt.", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
+
+        elif action == "say":
+            await interaction.response.send_message(action_data or "(Kein Text)", ephemeral=True)
+
+        else:
+            await interaction.response.send_message("✅", ephemeral=True)
+
+    # ---------- COMMANDS ----------
+    @commands.command(name="v2b", aliases=["v2builder", "v2build"])
     @commands.admin_or_permissions(manage_guild=True)
-    async def v2embed(self, ctx: commands.Context):
-        """Öffnet den interaktiven V2-Embed-Builder."""
-        if not V2_AVAILABLE:
-            return await ctx.send("❌ Deine discord.py-Version unterstützt keine Components V2.")
+    async def v2b(self, ctx: commands.Context):
+        """Öffnet den V2-Komponenten-Builder.
 
-        view = BuilderView(self)
+        Unterstützt: Container, Text, Separator, Section, Thumbnail,
+        MediaGallery, ActionRow und Buttons (mit Rollen-Aktionen).
+        """
+        if not V2_AVAILABLE:
+            return await ctx.send("❌ Deine discord.py-Version unterstützt kein Components V2.")
+
+        state = new_state(ctx.author.id)
+        self.sessions[ctx.author.id] = state
+
+        view = BuilderView(self, state)
         await ctx.send(view=view)
+
+    @commands.command(name="v2bclear")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def v2bclear(self, ctx: commands.Context):
+        """Löscht alle gespeicherten Button-Registrierungen dieser Guild."""
+        async with self.config.guild(ctx.guild).sent_messages() as sent:
+            sent.clear()
+        await ctx.send("✅ Alle gesendeten V2-Nachrichten-Einträge gelöscht.")
+
+    @commands.command(name="v2bhelp")
+    async def v2bhelp(self, ctx: commands.Context):
+        """Hilfe für den V2-Builder."""
+        if not V2_AVAILABLE:
+            return await ctx.send("❌ Components V2 nicht verfügbar.")
+        embed = discord.Embed(title="🧱 V2 Builder", color=discord.Color.dark_blue())
+        embed.description = (
+            "**Verfügbare Komponenten:**\n"
+            "📦 Container • 📝 Text • ➖ Separator • 📄 Section\n"
+            "🖼️ Thumbnail • 🖼️ MediaGallery • 🔘 ActionRow • 🔵 Button\n\n"
+            "**Button-Aktionen:**\n"
+            "`none` – keine Aktion\n"
+            "`role_add` – Rolle geben\n"
+            "`role_remove` – Rolle entfernen\n"
+            "`role_toggle` – Rolle an/aus\n"
+            "`say` – Nachricht an User\n"
+            "`link` – URL öffnen (Style: link)\n\n"
+            "**Button-Styles:** `primary`, `secondary`, `success`, `danger`, `link`"
+        )
+        await ctx.send(embed=embed)
 
 
 async def setup(bot):
-    await bot.add_cog(V2EmbedBuilder(bot))
+    await bot.add_cog(V2Builder(bot))
