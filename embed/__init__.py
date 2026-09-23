@@ -1,8 +1,9 @@
 import discord
+import re
 import logging
 from redbot.core import commands, Config
 
-log = logging.getLogger("red.embedbuilder")
+log = logging.getLogger("red.v2embed")
 
 # V2 Import mit sicherem Fallback
 V2_AVAILABLE = False
@@ -17,7 +18,7 @@ except ImportError:
 
 
 # ============================================================
-# MODALS (Eingabe-Fenster)
+# MODALS
 # ============================================================
 
 class TitleModal(Modal, title="Titel bearbeiten"):
@@ -180,7 +181,7 @@ class RemoveFieldModal(Modal, title="Feld entfernen"):
 
 
 # ============================================================
-# VIEW (Interaktives Panel)
+# VIEW
 # ============================================================
 
 if V2_AVAILABLE:
@@ -198,8 +199,15 @@ if V2_AVAILABLE:
                 "fields": [],
             }
 
+            # Preview-Container
+            self.add_item(self.build_preview_container())
+
+            # Buttons in zwei Reihen
+            row1, row2 = self.build_control_rows()
+            self.add_item(row1)
+            self.add_item(row2)
+
         def build_preview_container(self):
-            """Baut den Container mit der aktuellen Vorschau."""
             color = self.cog.parse_color(self.data.get("color", "")) or discord.Color.dark_blue()
             container = Container(accent_color=color)
 
@@ -232,8 +240,7 @@ if V2_AVAILABLE:
 
             return container
 
-        def build_control_row(self):
-            """Baut die ActionRow mit allen Bearbeitungs-Buttons."""
+        def build_control_rows(self):
             row1 = ActionRow()
             row1.add_item(BtnTitle())
             row1.add_item(BtnDescription())
@@ -251,7 +258,6 @@ if V2_AVAILABLE:
             return row1, row2
 
         async def refresh(self, interaction: discord.Interaction, already_responded: bool = False):
-            """Baut die View neu auf."""
             new_view = BuilderView(self.cog, self.data)
             try:
                 if already_responded:
@@ -259,7 +265,7 @@ if V2_AVAILABLE:
                 else:
                     await interaction.response.edit_message(view=new_view)
             except Exception as e:
-                log.error(f"[EmbedBuilder] Fehler beim Refresh: {e}")
+                log.error(f"[V2Embed] Refresh-Fehler: {e}")
 
 
     # ---------- BUTTONS ----------
@@ -269,8 +275,7 @@ if V2_AVAILABLE:
             super().__init__(label="Titel", style=discord.ButtonStyle.grey, row=0, emoji="📝")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            await interaction.response.send_modal(TitleModal(view))
+            await interaction.response.send_modal(TitleModal(self.view))
 
 
     class BtnDescription(Button):
@@ -278,8 +283,7 @@ if V2_AVAILABLE:
             super().__init__(label="Beschreibung", style=discord.ButtonStyle.grey, row=0, emoji="📄")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            await interaction.response.send_modal(DescriptionModal(view))
+            await interaction.response.send_modal(DescriptionModal(self.view))
 
 
     class BtnColor(Button):
@@ -287,8 +291,7 @@ if V2_AVAILABLE:
             super().__init__(label="Farbe", style=discord.ButtonStyle.grey, row=0, emoji="🎨")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            await interaction.response.send_modal(ColorModal(view))
+            await interaction.response.send_modal(ColorModal(self.view))
 
 
     class BtnAuthor(Button):
@@ -296,8 +299,7 @@ if V2_AVAILABLE:
             super().__init__(label="Autor", style=discord.ButtonStyle.grey, row=0, emoji="👤")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            await interaction.response.send_modal(AuthorModal(view))
+            await interaction.response.send_modal(AuthorModal(self.view))
 
 
     class BtnFooter(Button):
@@ -305,8 +307,7 @@ if V2_AVAILABLE:
             super().__init__(label="Footer", style=discord.ButtonStyle.grey, row=0, emoji="📎")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            await interaction.response.send_modal(FooterModal(view))
+            await interaction.response.send_modal(FooterModal(self.view))
 
 
     class BtnAddField(Button):
@@ -314,8 +315,7 @@ if V2_AVAILABLE:
             super().__init__(label="Feld +", style=discord.ButtonStyle.green, row=1, emoji="➕")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            await interaction.response.send_modal(AddFieldModal(view))
+            await interaction.response.send_modal(AddFieldModal(self.view))
 
 
     class BtnRemoveField(Button):
@@ -323,10 +323,9 @@ if V2_AVAILABLE:
             super().__init__(label="Feld -", style=discord.ButtonStyle.red, row=1, emoji="➖")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            if not view.data.get("fields"):
+            if not self.view.data.get("fields"):
                 return await interaction.response.send_message("❌ Keine Felder zum Entfernen.", ephemeral=True)
-            await interaction.response.send_modal(RemoveFieldModal(view))
+            await interaction.response.send_modal(RemoveFieldModal(self.view))
 
 
     class BtnClear(Button):
@@ -334,8 +333,7 @@ if V2_AVAILABLE:
             super().__init__(label="Leeren", style=discord.ButtonStyle.danger, row=1, emoji="🗑️")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            view.data = {
+            self.view.data = {
                 "title": "",
                 "description": "",
                 "color": "",
@@ -343,7 +341,7 @@ if V2_AVAILABLE:
                 "author": "",
                 "fields": [],
             }
-            await view.refresh(interaction)
+            await self.view.refresh(interaction)
 
 
     class BtnSend(Button):
@@ -354,19 +352,20 @@ if V2_AVAILABLE:
             view = self.view
             data = view.data
 
-            # Prüfen ob überhaupt was drin ist
-            if not any([data.get("title"), data.get("description"), data.get("fields"), data.get("footer"), data.get("author")]):
+            if not any([data.get("title"), data.get("description"), data.get("fields"),
+                        data.get("footer"), data.get("author")]):
                 return await interaction.response.send_message("❌ Das Embed ist leer.", ephemeral=True)
 
-            # Kanal-Auswahl anbieten
             await interaction.response.send_message(
                 "In welchen Kanal soll das Embed gesendet werden? "
-                "Erwähne den Kanal mit `#` in diesem Channel (30 Sekunden).",
+                "Erwähne den Kanal mit `#` (30 Sekunden Zeit).",
                 ephemeral=True
             )
 
             def check(m):
-                return m.author == interaction.user and m.channel == interaction.channel and m.channel_mentions
+                return (m.author == interaction.user
+                        and m.channel == interaction.channel
+                        and m.channel_mentions)
 
             try:
                 msg = await interaction.client.wait_for("message", check=check, timeout=30.0)
@@ -379,16 +378,18 @@ if V2_AVAILABLE:
             except discord.Forbidden:
                 pass
 
-            # View bauen und senden
-            final_container = view.build_preview_container()
             final_view = LayoutView()
-            final_view.add_item(final_container)
+            final_view.add_item(view.build_preview_container())
 
             try:
                 await target_channel.send(view=final_view)
-                await interaction.followup.send(f"✅ Embed wurde in {target_channel.mention} gesendet.", ephemeral=True)
+                await interaction.followup.send(
+                    f"✅ Embed wurde in {target_channel.mention} gesendet.", ephemeral=True
+                )
             except discord.Forbidden:
-                await interaction.followup.send(f"❌ Keine Berechtigung für {target_channel.mention}.", ephemeral=True)
+                await interaction.followup.send(
+                    f"❌ Keine Berechtigung für {target_channel.mention}.", ephemeral=True
+                )
             except Exception as e:
                 await interaction.followup.send(f"❌ Fehler: {e}", ephemeral=True)
 
@@ -398,8 +399,7 @@ if V2_AVAILABLE:
             super().__init__(label="Abbrechen", style=discord.ButtonStyle.secondary, row=1, emoji="✖️")
 
         async def callback(self, interaction: discord.Interaction):
-            view = self.view
-            view.stop()
+            self.view.stop()
             try:
                 await interaction.message.delete()
             except discord.Forbidden:
@@ -410,18 +410,15 @@ if V2_AVAILABLE:
 # HAUPT-COG
 # ============================================================
 
-class EmbedBuilder(commands.Cog):
+class V2EmbedBuilder(commands.Cog):
     """Interaktiver Embed-Builder im Components V2 Format."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0x454D4244)  # EMBD
+        self.config = Config.get_conf(self, identifier=0x5632454D)  # V2EM
         self.config.register_guild(saved_embeds={})
 
-    # ---------------- HELPER ----------------
-
     def parse_color(self, color_str: str):
-        """Konvertiert Hex oder Farbnamen zu discord.Color."""
         if not color_str:
             return None
 
@@ -457,19 +454,16 @@ class EmbedBuilder(commands.Cog):
         if key in named:
             return named[key]
 
-        import re
         match = re.match(r"^#?([0-9a-fA-F]{6})$", color_str)
         if match:
             return discord.Color(int(match.group(1), 16))
 
         return None
 
-    # ---------------- COMMANDS ----------------
-
-    @commands.command(name="embedbuilder", aliases=["eb"])
+    @commands.command(name="v2embed", aliases=["v2e"])
     @commands.admin_or_permissions(manage_guild=True)
-    async def embedbuilder(self, ctx: commands.Context):
-        """Öffnet den interaktiven Embed-Builder."""
+    async def v2embed(self, ctx: commands.Context):
+        """Öffnet den interaktiven V2-Embed-Builder."""
         if not V2_AVAILABLE:
             return await ctx.send("❌ Deine discord.py-Version unterstützt keine Components V2.")
 
@@ -478,4 +472,4 @@ class EmbedBuilder(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(EmbedBuilder(bot))
+    await bot.add_cog(V2EmbedBuilder(bot))
