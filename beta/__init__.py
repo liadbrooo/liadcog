@@ -4,9 +4,8 @@ from redbot.core import commands, Config
 
 log = logging.getLogger("red.beta")
 
-# Prüfen, ob Discord Components V2 verfügbar ist
 try:
-    from discord.ui import LayoutView, Container, TextDisplay, Separator, ActionRow, Button, Modal, TextInput
+    from discord.ui import LayoutView, Container, TextDisplay, Separator, ActionRow, Button, Modal, TextInput, View
     V2_AVAILABLE = True
 except ImportError:
     V2_AVAILABLE = False
@@ -21,7 +20,7 @@ class BetaModal1(Modal):
         self.cog = cog
 
         self.fivem_discord = TextInput(
-            label="Wie lautet dein FiveM + Discord Name?",
+            label="FiveM + Discord Name",
             placeholder="z.B. MaxMustermann | Max#1234",
             required=True,
             max_length=100
@@ -50,10 +49,20 @@ class BetaModal1(Modal):
             "ic_name": self.ic_name.value,
             "discord_id": self.discord_id.value,
         }
-        
-        # Modal 2 direkt öffnen und Daten übergeben
-        modal2 = BetaModal2(self.cog, data1)
-        await interaction.response.send_modal(modal2)
+
+        # Daten zwischenspeichern für Modal 2
+        self.cog.pending_applications[interaction.user.id] = data1
+
+        # Ephemere Nachricht mit Button "Weiter zu Teil 2"
+        # (Ein Modal darf NICHT direkt aus einem Modal-Submit heraus geöffnet werden!)
+        view = View(timeout=300)  # 5 Minuten gültig
+        view.add_item(ContinueToModal2Button())
+
+        await interaction.response.send_message(
+            "✅ **Teil 1 abgeschlossen!**\nKlicke auf den Button unten, um mit **Teil 2** fortzufahren.",
+            view=view,
+            ephemeral=True
+        )
 
 
 # ==========================================
@@ -63,7 +72,7 @@ class BetaModal2(Modal):
     def __init__(self, cog, data1):
         super().__init__(title="Betabewerbung - Teil 2/2")
         self.cog = cog
-        self.data1 = data1  # Daten aus Modal 1 speichern
+        self.data1 = data1
 
         self.fraktion = TextInput(
             label="In welcher Fraktion arbeitest du?",
@@ -114,25 +123,56 @@ class BetaModal2(Modal):
             "user": interaction.user
         }
 
+        # Zwischenspeicher aufräumen
+        self.cog.pending_applications.pop(interaction.user.id, None)
+
         # An den Log-Kanal senden
         await self.cog.send_application_log(interaction.guild, data)
-        
+
         # User bestätigen
         await interaction.response.send_message(
-            "✅ Vielen Dank für deine Bewerbung! Sie wurde erfolgreich eingereicht und wird vom Team geprüft.",
+            "✅ **Vielen Dank für deine Bewerbung!**\nSie wurde erfolgreich eingereicht und wird vom Team geprüft.",
             ephemeral=True
         )
 
 
 # ==========================================
-# BUTTON & VIEW
+# BUTTONS
 # ==========================================
+class ContinueToModal2Button(Button):
+    """Öffnet Modal 2 (muss über einen Button erfolgen, nicht direkt aus Modal 1)."""
+    def __init__(self):
+        super().__init__(
+            label="Weiter zu Teil 2",
+            style=discord.ButtonStyle.primary,
+            custom_id="beta_continue_modal2_v1",
+            emoji="➡️"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Beta")
+        if not cog:
+            return
+
+        # Daten aus Modal 1 abrufen
+        data1 = cog.pending_applications.get(interaction.user.id)
+        if not data1:
+            return await interaction.response.send_message(
+                "❌ Deine vorherigen Antworten sind verloren gegangen. "
+                "Bitte starte die Bewerbung erneut.",
+                ephemeral=True
+            )
+
+        # Modal 2 öffnen (aus einem Button heraus IST das erlaubt!)
+        await interaction.response.send_modal(BetaModal2(cog, data1))
+
+
 class BetaApplyButton(Button):
     def __init__(self):
         super().__init__(
             label="Jetzt bewerben",
             style=discord.ButtonStyle.primary,
-            custom_id="beta_apply_button_v1",  # Wichtig für Persistenz!
+            custom_id="beta_apply_button_v1",
             emoji="📝"
         )
 
@@ -145,19 +185,18 @@ class BetaApplyButton(Button):
         await interaction.response.send_modal(BetaModal1(cog))
 
 
+# ==========================================
+# VIEW
+# ==========================================
 class BetaApplicationView(LayoutView):
     def __init__(self):
-        super().__init__(timeout=None)  # timeout=None = Persistenz nach Neustart
+        super().__init__(timeout=None)
 
-        # Haupt-Container (Dark Blue)
         container = Container(accent_color=discord.Color.dark_blue())
-        
-        # Titel & Beschreibung
         container.add_item(TextDisplay("## Betabewerbung - Kreis Lindenberg"))
         container.add_item(TextDisplay("Hier kannst du dich auf unserem Server ( Kreis Lindenberg ) für die Beta bewerben."))
         container.add_item(Separator())
 
-        # Infos aus dem Google Formular
         container.add_item(TextDisplay("### Informationen"))
         container.add_item(TextDisplay(
             "1. Es kann sein, dass wir uns dazu entscheiden sollten, doch einen „offenen“ Release durchzuführen und keine Beta zu machen.\n"
@@ -169,7 +208,6 @@ class BetaApplicationView(LayoutView):
         container.add_item(Separator())
         container.add_item(TextDisplay("-# Klicke unten auf den Button, um das Bewerbungsformular zu öffnen."))
 
-        # Button hinzufügen
         row = ActionRow()
         row.add_item(BetaApplyButton())
         container.add_item(row)
@@ -185,7 +223,7 @@ class Beta(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0x42455441)  # BETA
+        self.config = Config.get_conf(self, identifier=0x42455441)
 
         default_guild = {
             "channel_id": None,
@@ -194,7 +232,9 @@ class Beta(commands.Cog):
         }
         self.config.register_guild(**default_guild)
 
-        # View nach Neustart registrieren, damit der Button funktioniert
+        # Zwischenspeicher für laufende Bewerbungen (User-ID → Daten aus Modal 1)
+        self.pending_applications = {}
+
         if V2_AVAILABLE:
             self.bot.add_view(BetaApplicationView())
 
@@ -203,17 +243,17 @@ class Beta(commands.Cog):
         log_channel_id = await self.config.guild(guild).log_channel()
         if not log_channel_id:
             log.warning("[Beta] Kein Log-Kanal konfiguriert. Bewerbung konnte nicht gesendet werden.")
+            # Fallback: DM an den Bewerber? Oder ins Nichts?
             return
-            
+
         log_channel = guild.get_channel(log_channel_id)
         if not log_channel:
             return
 
-        # V2 Container für die Bewerbung
         view = LayoutView()
         container = Container(accent_color=discord.Color.green())
-        
-        container.add_item(TextDisplay(f"## 📝 Neue Betabewerbung"))
+
+        container.add_item(TextDisplay("## 📝 Neue Betabewerbung"))
         container.add_item(TextDisplay(f"**Bewerber:** {data['user'].mention} (`{data['user'].id}`)"))
         container.add_item(Separator())
 
@@ -225,7 +265,7 @@ class Beta(commands.Cog):
         container.add_item(TextDisplay(f"**Warum Beta:**\n{data['warum_beta']}"))
         container.add_item(TextDisplay(f"**Warum dich:**\n{data['warum_dich']}"))
         container.add_item(TextDisplay(f"**Bugs melden:**\n{data['bugs']}"))
-        
+
         view.add_item(container)
 
         try:
