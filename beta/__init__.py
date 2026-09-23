@@ -1,609 +1,824 @@
 import discord
-import logging
+from discord.ext import commands
 from redbot.core import commands, Config
+from redbot.core.bot import Red
+import re
+import asyncio
+import logging
 
-log = logging.getLogger("red.beta")
+log = logging.getLogger("red.whitelist")
 
+# V2 Import
 try:
-    from discord.ui import LayoutView, Container, TextDisplay, Separator, ActionRow, Button, Modal, TextInput, View
+    from discord.ui import LayoutView, Container, TextDisplay, Separator, ActionRow, Button
     V2_AVAILABLE = True
 except ImportError:
     V2_AVAILABLE = False
 
 
-# ==========================================
-# MODAL 1
-# ==========================================
-class BetaModal1(Modal):
-    def __init__(self, cog):
-        super().__init__(title="Betabewerbung - Teil 1/2")
-        self.cog = cog
+# ============================================================
+# BUTTONS (persistent durch custom_id)
+# ============================================================
 
-        self.fivem_discord = TextInput(
-            label="FiveM + Discord Name",
-            placeholder="z.B. Max Mustermann",
-            required=True,
-            max_length=100
-        )
-        self.ic_name = TextInput(
-            label="Wie willst du IC heißen?",
-            placeholder="z.B. Max Mustermann",
-            required=True,
-            max_length=100
-        )
-
-        self.add_item(self.fivem_discord)
-        self.add_item(self.ic_name)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        data1 = {
-            "fivem_discord": self.fivem_discord.value,
-            "ic_name": self.ic_name.value,
-            "discord_user_id": interaction.user.id,
-            "discord_user_name": str(interaction.user),
-            "created_at": discord.utils.utcnow().timestamp(),
-        }
-
-        # Zwischenspeichern (persistent über Config)
-        async with self.cog.config.guild(interaction.guild).applications() as apps:
-            apps[str(interaction.user.id)] = {"data": data1, "status": "pending_modal2"}
-
-        view = View(timeout=600)
-        view.add_item(ContinueToModal2Button(interaction.user.id))
-
-        await interaction.response.send_message(
-            "✅ **Teil 1 abgeschlossen!**\nKlicke auf den Button unten, um mit **Teil 2** fortzufahren.",
-            view=view,
-            ephemeral=True
-        )
-
-
-# ==========================================
-# MODAL 2
-# ==========================================
-class BetaModal2(Modal):
-    def __init__(self, cog, data1):
-        super().__init__(title="Betabewerbung - Teil 2/2")
-        self.cog = cog
-        self.data1 = data1
-
-        self.fraktion = TextInput(
-            label="In welcher Fraktion arbeitest du?",
-            placeholder="z.B. Polizeidirektion, Fire Dept, GearHead, Arbeitslos...",
-            required=True,
-            max_length=100
-        )
-        self.plan_ic = TextInput(
-            label="Was ist dein Plan IC?",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=500
-        )
-        self.warum_beta = TextInput(
-            label="Warum willst du bei uns in die Beta?",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=500
-        )
-        self.warum_dich = TextInput(
-            label="Warum sollten wir dich nehmen?",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=500
-        )
-        self.bugs = TextInput(
-            label="Wirst du Bugs ernst nehmen und melden?",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=300
-        )
-
-        for item in (self.fraktion, self.plan_ic, self.warum_beta, self.warum_dich, self.bugs):
-            self.add_item(item)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        data = {
-            **self.data1,
-            "fraktion": self.fraktion.value,
-            "plan_ic": self.plan_ic.value,
-            "warum_beta": self.warum_beta.value,
-            "warum_dich": self.warum_dich.value,
-            "bugs": self.bugs.value,
-        }
-
-        log_message_id = await self.cog.send_application_log(interaction.guild, interaction.user, data)
-
-        async with self.cog.config.guild(interaction.guild).applications() as apps:
-            apps[str(interaction.user.id)] = {
-                "data": data,
-                "status": "pending_review",
-                "log_message_id": log_message_id,
-            }
-
-        await interaction.response.send_message(
-            "✅ **Vielen Dank für deine Bewerbung!**\nSie wurde eingereicht und wird vom Team geprüft.",
-            ephemeral=True
-        )
-
-
-# ==========================================
-# BUTTONS
-# ==========================================
-class ContinueToModal2Button(Button):
-    def __init__(self, user_id):
-        super().__init__(
-            label="Weiter zu Teil 2",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"beta_continue_{user_id}",
-            emoji="➡️"
-        )
-
-
-class BetaApplyButton(Button):
+class StartApplicationButton(Button):
     def __init__(self):
         super().__init__(
-            label="Jetzt bewerben",
+            label="Bewerbung starten",
             style=discord.ButtonStyle.primary,
-            custom_id="beta_apply_button_v1",
+            custom_id="fivem_wl_start_v11",
             emoji="📝"
         )
 
     async def callback(self, interaction: discord.Interaction):
-        cog = interaction.client.get_cog("Beta")
+        cog = interaction.client.get_cog("FiveMWhitelist")
         if not cog:
             return
 
-        # Sperr-Check: Wurde der User abgelehnt?
-        rejected = await cog.config.guild(interaction.guild).rejected_users()
-        if interaction.user.id in rejected:
+        # Blacklist-Check
+        blacklist = await cog.config.guild(interaction.guild).blacklist()
+        if interaction.user.id in blacklist:
             return await interaction.response.send_message(
-                "❌ Du wurdest für die Beta abgelehnt und kannst dich nicht erneut bewerben.",
+                "🚫 **Du befindest dich auf der Blacklist!**\n"
+                "Du wurdest von der Whitelist-Bewerbung ausgeschlossen. Bei Fragen wende dich an ein Teammitglied.",
                 ephemeral=True
             )
 
-        # Sperr-Check: Läuft schon eine Bewerbung?
-        apps = await cog.config.guild(interaction.guild).applications()
-        existing = apps.get(str(interaction.user.id))
-        if existing:
-            status = existing.get("status")
-            if status == "accepted":
-                return await interaction.response.send_message(
-                    "✅ Du bist bereits für die Beta angenommen!",
-                    ephemeral=True
-                )
-            elif status == "rejected":
-                return await interaction.response.send_message(
-                    "❌ Du wurdest leider abgelehnt.",
-                    ephemeral=True
-                )
-            else:
-                return await interaction.response.send_message(
-                    "⏳ Du hast bereits eine laufende Bewerbung. Bitte warte auf die Antwort des Teams.",
-                    ephemeral=True
-                )
+        # WL-Check
+        wl_role_id = await cog.config.guild(interaction.guild).wl_role()
+        if wl_role_id:
+            wl_role = interaction.guild.get_role(wl_role_id)
+            if wl_role and wl_role in interaction.user.roles:
+                return await interaction.response.send_message("Du bist bereits gewhitelisted! 🎉", ephemeral=True)
 
-        await interaction.response.send_modal(BetaModal1(cog))
+        await interaction.response.send_modal(WhitelistModal(cog.config))
 
 
-# ==========================================
-# VIEW
-# ==========================================
-class BetaApplicationView(LayoutView):
+class AcceptButton(Button):
     def __init__(self):
+        super().__init__(
+            label="Annehmen",
+            style=discord.ButtonStyle.success,
+            custom_id="fivem_wl_accept_v11",
+            emoji="✅"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("FiveMWhitelist")
+        if not cog:
+            return
+        if not await cog.check_perm_interaction(interaction):
+            return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
+
+        data = await cog.get_application(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ Bewerbung nicht gefunden.", ephemeral=True)
+
+        applicant = interaction.guild.get_member(data["user_id"])
+        wl_role_id = await cog.config.guild(interaction.guild).wl_role()
+        wl_role = interaction.guild.get_role(wl_role_id) if wl_role_id else None
+
+        if not wl_role:
+            return await interaction.response.send_message("❌ Whitelist-Rolle nicht konfiguriert.", ephemeral=True)
+        if not applicant:
+            return await interaction.response.send_message("❌ Bewerber nicht mehr auf dem Server.", ephemeral=True)
+
+        try:
+            await applicant.add_roles(wl_role, reason=f"Whitelist angenommen von {interaction.user}")
+        except discord.Forbidden:
+            return await interaction.response.send_message("❌ Keine Berechtigung, die Rolle zu vergeben.", ephemeral=True)
+
+        dm_failed = False
+        try:
+            await applicant.send(
+                f"🎉 **Herzlichen Glückwunsch!**\n"
+                f"Deine Whitelist-Bewerbung auf **{interaction.guild.name}** wurde angenommen!"
+            )
+        except discord.Forbidden:
+            dm_failed = True
+
+        # Status in Config
+        await cog.set_application_status(interaction, "accepted", interaction.user)
+
+        # View neu aufbauen
+        new_view = cog.build_application_view(data, status="accepted", admin=interaction.user)
+        await interaction.response.edit_message(view=new_view)
+
+        if dm_failed:
+            await interaction.followup.send("⚠️ User angenommen, aber DMs gesperrt.", ephemeral=True)
+
+
+class RejectButton(Button):
+    def __init__(self):
+        super().__init__(
+            label="Ablehnen",
+            style=discord.ButtonStyle.danger,
+            custom_id="fivem_wl_reject_v11",
+            emoji="❌"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("FiveMWhitelist")
+        if not cog:
+            return
+        if not await cog.check_perm_interaction(interaction):
+            return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
+
+        data = await cog.get_application(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ Bewerbung nicht gefunden.", ephemeral=True)
+
+        applicant = interaction.guild.get_member(data["user_id"])
+        if not applicant:
+            return await interaction.response.send_message("❌ Bewerber nicht mehr auf dem Server.", ephemeral=True)
+
+        await interaction.response.send_modal(
+            RejectReasonModal(cog, applicant, interaction.message, interaction.guild.name, interaction.user, data)
+        )
+
+
+class QuestionsButton(Button):
+    def __init__(self):
+        super().__init__(
+            label="Rückfragen",
+            style=discord.ButtonStyle.secondary,
+            custom_id="fivem_wl_questions_v11",
+            emoji="❓"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("FiveMWhitelist")
+        if not cog:
+            return
+        if not await cog.check_perm_interaction(interaction):
+            return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
+
+        data = await cog.get_application(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ Bewerbung nicht gefunden.", ephemeral=True)
+
+        applicant = interaction.guild.get_member(data["user_id"])
+        if not applicant:
+            return await interaction.response.send_message("❌ Bewerber nicht mehr auf dem Server.", ephemeral=True)
+
+        try:
+            await applicant.send(
+                f"❓ **Rückfragen zu deiner Bewerbung**\n\n"
+                f"Hallo {applicant.mention}, wir haben noch ein paar Fragen zu deiner Whitelist-Anfrage. "
+                f"Bitte komm in den Support-Warteraum oder eröffne ein Ticket."
+            )
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "⚠️ Der User hat DMs gesperrt. Bitte anderweitig kontaktieren.", ephemeral=True
+            )
+
+        await cog.set_application_status(interaction, "questions", interaction.user)
+        new_view = cog.build_application_view(data, status="questions", admin=interaction.user)
+        await interaction.response.edit_message(view=new_view)
+
+
+# ============================================================
+# VIEWS
+# ============================================================
+
+class WhitelistButtonView(LayoutView):
+    def __init__(self, config: Config):
         super().__init__(timeout=None)
+        self.config = config
 
         container = Container(accent_color=discord.Color.dark_blue())
-        container.add_item(TextDisplay("## Betabewerbung - Kreis Lindenberg"))
-        container.add_item(TextDisplay("Hier kannst du dich auf unserem Server ( Kreis Lindenberg ) für die Beta bewerben."))
-        container.add_item(Separator())
-
-        container.add_item(TextDisplay("### Informationen"))
+        container.add_item(TextDisplay("## 🚨 FiveM Whitelist Bewerbung"))
         container.add_item(TextDisplay(
-            "1. Es kann sein, dass wir uns dazu entscheiden sollten, doch einen „offenen“ Release durchzuführen und keine Beta zu machen.\n"
-            "2. Diese Informationen bleiben Teamintern bzw. High-Team intern!\n"
-            "3. Der Release bzw. Beta-Release (falls dieser stattfindet, wird im Discord angekündigt)\n"
-            "4. Die Antworten auf die Bewerbungen werden etwas Zeit beanspruchen\n\n"
-            "Ansonsten wünschen wir weiterhin viel Spaß und Erfolg :)"
+            "Willkommen auf unserem Server!\n\n"
+            "Um auf unseren Server zu kommen und die Whitelist zu erhalten, "
+            "musst du ein kurzes Formular ausfüllen."
         ))
         container.add_item(Separator())
-        container.add_item(TextDisplay("-# Klicke unten auf den Button, um das Bewerbungsformular zu öffnen."))
+        container.add_item(TextDisplay("-# Klicke unten auf den Button, um deine Bewerbung zu starten."))
 
         row = ActionRow()
-        row.add_item(BetaApplyButton())
+        row.add_item(StartApplicationButton())
         container.add_item(row)
 
         self.add_item(container)
 
 
-# ==========================================
-# HAUPT-COG
-# ==========================================
-class Beta(commands.Cog):
-    """Beta-Bewerbungssystem mit V2 Components, Modals und Annehmen/Ablehnen."""
+class ApplicationActionsView(LayoutView):
+    """Wird nur für die Registrierung der Buttons beim Bot-Start gebraucht."""
+    def __init__(self, config: Config):
+        super().__init__(timeout=None)
+        self.config = config
 
-    def __init__(self, bot):
+        container = Container(accent_color=discord.Color.orange())
+        container.add_item(TextDisplay("### Bewerbungs-Aktionen"))
+        row = ActionRow()
+        row.add_item(AcceptButton())
+        row.add_item(RejectButton())
+        row.add_item(QuestionsButton())
+        container.add_item(row)
+        self.add_item(container)
+
+
+# ============================================================
+# MODALS
+# ============================================================
+
+class WhitelistModal(discord.ui.Modal, title="FiveM Whitelist Bewerbung"):
+    def __init__(self, config: Config):
+        super().__init__()
+        self.config = config
+
+    ooc_name = discord.ui.TextInput(
+        label="Dein Name (OOC)",
+        placeholder="Dein echter Vorname (z.B. Max)",
+        required=True,
+        max_length=30
+    )
+    alter = discord.ui.TextInput(
+        label="Dein Alter (OOC)",
+        placeholder="z.B. 22",
+        required=True,
+        min_length=2,
+        max_length=3
+    )
+    rp_erfahrung = discord.ui.TextInput(
+        label="Deine Roleplay-Erfahrung",
+        placeholder="Seit wann spielst du RP? Welche Server?",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500
+    )
+    ic_plans = discord.ui.TextInput(
+        label="Was planst du auf dem Server? (IC)",
+        placeholder="z.B. Polizei, Arzt, Gangmitglied, Mechaniker...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500
+    )
+    charakter_geschichte = discord.ui.TextInput(
+        label="Deine Charakter-Geschichte",
+        placeholder="Erzähl uns kurz die Hintergrundgeschichte deines Characters...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("FiveMWhitelist")
+        if not cog:
+            return
+
+        log_channel_id = await self.config.guild(interaction.guild).log_channel()
+        if not log_channel_id:
+            return await interaction.response.send_message("Fehler: Kein Log-Channel gesetzt.", ephemeral=True)
+
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        if not log_channel:
+            return await interaction.response.send_message("Fehler: Log-Channel nicht gefunden.", ephemeral=True)
+
+        data = {
+            "user_id": interaction.user.id,
+            "ooc_name": self.ooc_name.value,
+            "alter": self.alter.value,
+            "rp_erfahrung": self.rp_erfahrung.value,
+            "ic_plans": self.ic_plans.value,
+            "charakter_geschichte": self.charakter_geschichte.value,
+            "status": "pending",
+        }
+
+        # Ping-Content bauen
+        ping_role_id = await self.config.guild(interaction.guild).ping_role()
+        content = None
+        if ping_role_id:
+            role = interaction.guild.get_role(ping_role_id)
+            if role:
+                content = f"🔔 Neue Bewerbung von {interaction.user.mention}\n{role.mention}"
+
+        # V2 View bauen
+        view = cog.build_application_view(data, status="pending")
+
+        try:
+            msg = await log_channel.send(content=content, view=view)
+        except Exception as e:
+            log.error(f"[Whitelist] Fehler beim Senden der Bewerbung: {e}")
+            return await interaction.response.send_message("❌ Fehler beim Senden an das Team.", ephemeral=True)
+
+        # Daten in Config speichern (persistent für Buttons nach Neustart)
+        async with self.config.guild(interaction.guild).applications() as apps:
+            apps[str(msg.id)] = data
+
+        await interaction.response.send_message(
+            "✅ Deine Bewerbung wurde erfolgreich an das Team gesendet! Bitte habe etwas Geduld.",
+            ephemeral=True
+        )
+
+
+class RejectReasonModal(discord.ui.Modal, title="Grund für Ablehnung"):
+    def __init__(self, cog, applicant, original_message, guild_name, admin, data):
+        super().__init__()
+        self.cog = cog
+        self.applicant = applicant
+        self.original_message = original_message
+        self.guild_name = guild_name
+        self.admin = admin
+        self.data = data
+
+    reason = discord.ui.TextInput(
+        label="Warum wird der Bewerber abgelehnt?",
+        placeholder="z.B. Alter passt nicht, unzureichende Antwort...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dm_failed = False
+        try:
+            await self.applicant.send(
+                f"❌ **Bedauerlicherweise...**\n"
+                f"Deine Whitelist-Bewerbung auf **{self.guild_name}** wurde leider abgelehnt.\n\n"
+                f"**Grund:** {self.reason.value}\n\n"
+                f"Du kannst es gerne erneut versuchen."
+            )
+        except discord.Forbidden:
+            dm_failed = True
+
+        # Status speichern
+        async with self.cog.config.guild(interaction.guild).applications() as apps:
+            key = str(self.original_message.id)
+            if key in apps:
+                apps[key]["status"] = "rejected"
+                apps[key]["decided_by"] = self.admin.id
+                apps[key]["reason"] = self.reason.value
+
+        # View neu aufbauen mit Ablehnung
+        new_view = self.cog.build_application_view(
+            self.data, status="rejected", admin=self.admin, reason=self.reason.value
+        )
+        await self.original_message.edit(view=new_view)
+
+        if dm_failed:
+            await interaction.response.send_message(
+                "⚠️ User abgelehnt, aber DMs gesperrt.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message("✅ Bewerber abgelehnt und informiert.", ephemeral=True)
+
+
+# ============================================================
+# HAUPT-COG
+# ============================================================
+
+class FiveMWhitelist(commands.Cog):
+    def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0x42455441)
+        self.config = Config.get_conf(self, identifier=9876543210, force_registration=True)
 
         default_guild = {
-            "channel_id": None,
-            "message_id": None,
             "log_channel": None,
-            "accepted_role": None,
-            "applications": {},   # user_id: {"data": {...}, "status": "...", "log_message_id": int}
-            "rejected_users": [], # Liste von User-IDs
+            "wl_role": None,
+            "ping_role": None,
+            "extra_wl_roles": [],
+            "blacklist": [],
+            "blacklist_channel": None,
+            "applications": {},  # msg_id (str) → {user_id, ooc_name, ..., status}
         }
         self.config.register_guild(**default_guild)
 
+        # Persistente Views registrieren
         if V2_AVAILABLE:
-            self.bot.add_view(BetaApplicationView())
+            self.bot.add_view(WhitelistButtonView(self.config))
+            self.bot.add_view(ApplicationActionsView(self.config))
 
-    # ---------------- INTERACTION HANDLER ----------------
-    # Fängt ALLE persistenten Buttons ab, auch nach Neustart!
-    @commands.Cog.listener()
-    async def on_interaction(self, interaction: discord.Interaction):
-        if interaction.type != discord.InteractionType.component:
-            return
-        if not interaction.data or not interaction.guild:
-            return
+    # ---------------- HELPER ----------------
 
-        custom_id = interaction.data.get("custom_id", "")
+    def build_application_view(self, data: dict, status: str = "pending", admin: discord.Member = None, reason: str = None):
+        """Baut die Log-Nachricht je nach Status auf."""
+        if not V2_AVAILABLE:
+            # Fallback: klassisches Embed (nur wenn V2 nicht verfügbar)
+            return None
 
-        if custom_id.startswith("beta_continue_"):
-            await self.handle_continue(interaction, custom_id)
-        elif custom_id.startswith("beta_accept_"):
-            await self.handle_decision(interaction, custom_id, accept=True)
-        elif custom_id.startswith("beta_reject_"):
-            await self.handle_decision(interaction, custom_id, accept=False)
+        colors = {
+            "pending": discord.Color.orange(),
+            "accepted": discord.Color.green(),
+            "rejected": discord.Color.red(),
+            "questions": discord.Color.gold(),
+        }
+        titles = {
+            "pending": "📋 Neue Whitelist Bewerbung",
+            "accepted": "✅ Angenommen",
+            "rejected": "❌ Abgelehnt",
+            "questions": "❓ Rückfragen gestellt",
+        }
 
-    async def handle_continue(self, interaction: discord.Interaction, custom_id: str):
-        try:
-            user_id = int(custom_id.rsplit("_", 1)[1])
-        except (ValueError, IndexError):
-            return
-
-        if interaction.user.id != user_id:
-            return await interaction.response.send_message("❌ Das ist nicht deine Bewerbung.", ephemeral=True)
-
-        apps = await self.config.guild(interaction.guild).applications()
-        app_data = apps.get(str(user_id))
-        if not app_data or app_data.get("status") != "pending_modal2":
-            return await interaction.response.send_message(
-                "❌ Deine vorherigen Antworten sind verloren gegangen. Bitte starte die Bewerbung neu.",
-                ephemeral=True
-            )
-
-        await interaction.response.send_modal(BetaModal2(self, app_data["data"]))
-
-    async def handle_decision(self, interaction: discord.Interaction, custom_id: str, accept: bool):
-        try:
-            user_id = int(custom_id.rsplit("_", 1)[1])
-        except (ValueError, IndexError):
-            return
-
-        guild = interaction.guild
-
-        # Permission-Check: Nur Admins oder Team-Rolle
-        if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild):
-            return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
-
-        apps = await self.config.guild(guild).applications()
-        app_data = apps.get(str(user_id))
-        if not app_data:
-            return await interaction.response.send_message("❌ Keine Bewerbung gefunden.", ephemeral=True)
-
-        if app_data.get("status") in ("accepted", "rejected"):
-            return await interaction.response.send_message("❌ Diese Bewerbung wurde bereits bearbeitet.", ephemeral=True)
-
-        member = guild.get_member(user_id)
-        data = app_data["data"]
-
-        if accept:
-            # Rolle prüfen
-            role_id = await self.config.guild(guild).accepted_role()
-            if not role_id:
-                return await interaction.response.send_message(
-                    "❌ Es wurde noch keine Annahme-Rolle konfiguriert. Nutze `betarole @Rolle`.",
-                    ephemeral=True
-                )
-            role = guild.get_role(role_id)
-            if not role:
-                return await interaction.response.send_message("❌ Die konfigurierte Rolle existiert nicht mehr.", ephemeral=True)
-
-            # Rolle vergeben
-            if member:
-                try:
-                    await member.add_roles(role, reason=f"Beta-Bewerbung angenommen von {interaction.user}")
-                except discord.Forbidden:
-                    return await interaction.response.send_message(
-                        "❌ Ich kann die Rolle nicht vergeben. Prüfe die Rollen-Hierarchie.",
-                        ephemeral=True
-                    )
-
-            # DM senden
-            if member:
-                try:
-                    dm_embed = discord.Embed(
-                        title="🎉 Beta-Bewerbung angenommen!",
-                        description=(
-                            f"Herzlichen Glückwunsch, **{data['ic_name']}**!\n\n"
-                            f"Deine Bewerbung für die Beta auf **Kreis Lindenberg** wurde **angenommen**.\n"
-                            f"Du hast soeben die Rolle **{role.name}** erhalten.\n\n"
-                            "Wir freuen uns auf dich!"
-                        ),
-                        color=discord.Color.green()
-                    )
-                    dm_embed.set_footer(text="Kreis Lindenberg Team")
-                    await member.send(embed=dm_embed)
-                except discord.Forbidden:
-                    log.warning(f"[Beta] Konnte {member} keine DM senden.")
-
-            # Status speichern
-            async with self.config.guild(guild).applications() as apps2:
-                if str(user_id) in apps2:
-                    apps2[str(user_id)]["status"] = "accepted"
-                    apps2[str(user_id)]["decided_by"] = interaction.user.id
-
-            await interaction.response.send_message(f"✅ {member.mention if member else user_id} wurde **angenommen**.", ephemeral=True)
-            await self.update_log_message(interaction, app_data, "accepted", interaction.user)
-
-        else:
-            # Reject
-            async with self.config.guild(guild).rejected_users() as rejected:
-                if user_id not in rejected:
-                    rejected.append(user_id)
-
-            async with self.config.guild(guild).applications() as apps2:
-                if str(user_id) in apps2:
-                    apps2[str(user_id)]["status"] = "rejected"
-                    apps2[str(user_id)]["decided_by"] = interaction.user.id
-
-            if member:
-                try:
-                    dm_embed = discord.Embed(
-                        title="❌ Beta-Bewerbung abgelehnt",
-                        description=(
-                            f"Hallo **{data['ic_name']}**,\n\n"
-                            "leider müssen wir dir mitteilen, dass deine Bewerbung für die Beta **abgelehnt** wurde.\n"
-                            "Du kannst dich nicht erneut bewerben."
-                        ),
-                        color=discord.Color.red()
-                    )
-                    dm_embed.set_footer(text="Kreis Lindenberg Team")
-                    await member.send(embed=dm_embed)
-                except discord.Forbidden:
-                    log.warning(f"[Beta] Konnte {member} keine DM senden.")
-
-            await interaction.response.send_message(f"❌ {member.mention if member else user_id} wurde **abgelehnt**.", ephemeral=True)
-            await self.update_log_message(interaction, app_data, "rejected", interaction.user)
-
-    async def update_log_message(self, interaction: discord.Interaction, app_data: dict, decision: str, admin):
-        """Aktualisiert die Log-Nachricht, um Buttons zu deaktivieren und Entscheidung anzuzeigen."""
-        try:
-            message = interaction.message
-            if not message:
-                return
-            view = self.build_log_view(app_data["data"], decided=decision, admin=admin)
-            await message.edit(view=view)
-        except Exception as e:
-            log.error(f"[Beta] Konnte Log-Nachricht nicht aktualisieren: {e}")
-
-    # ---------------- LOG ----------------
-    def build_log_view(self, data: dict, decided: str = None, admin=None):
-        """Erstellt die Log-Nachricht (Buttons oder Entscheidung)."""
         view = LayoutView()
+        container = Container(accent_color=colors.get(status, discord.Color.orange()))
 
-        if decided == "accepted":
-            color = discord.Color.green()
-        elif decided == "rejected":
-            color = discord.Color.red()
-        else:
-            color = discord.Color.dark_blue()
-
-        container = Container(accent_color=color)
-        container.add_item(TextDisplay("## 📝 Neue Betabewerbung"))
-        container.add_item(TextDisplay(f"**Bewerber:** <@{data['discord_user_id']}> (`{data['discord_user_id']}`)"))
+        container.add_item(TextDisplay(f"## {titles.get(status, '📋 Bewerbung')}"))
+        container.add_item(TextDisplay(f"**Bewerber:** <@{data['user_id']}> (`{data['user_id']}`)"))
         container.add_item(Separator())
 
-        container.add_item(TextDisplay(f"**FiveM + Discord Name:**\n{data['fivem_discord']}"))
-        container.add_item(TextDisplay(f"**IC Name:**\n{data['ic_name']}"))
-        container.add_item(TextDisplay(f"**Fraktion:**\n{data['fraktion']}"))
-        container.add_item(TextDisplay(f"**Plan IC:**\n{data['plan_ic']}"))
-        container.add_item(TextDisplay(f"**Warum Beta:**\n{data['warum_beta']}"))
-        container.add_item(TextDisplay(f"**Warum dich:**\n{data['warum_dich']}"))
-        container.add_item(TextDisplay(f"**Bugs melden:**\n{data['bugs']}"))
-
+        container.add_item(TextDisplay(f"**Name (OOC):** {data['ooc_name']}"))
+        container.add_item(TextDisplay(f"**Alter (OOC):** {data['alter']}"))
+        container.add_item(TextDisplay(f"**Roleplay-Erfahrung:**\n{data['rp_erfahrung']}"))
+        container.add_item(TextDisplay(f"**IC Pläne:**\n{data['ic_plans']}"))
+        container.add_item(TextDisplay(f"**Charakter-Geschichte:**\n{data['charakter_geschichte']}"))
         container.add_item(Separator())
 
-        if decided is None:
+        if status == "pending":
             row = ActionRow()
-            row.add_item(Button(
-                label="Annehmen",
-                style=discord.ButtonStyle.success,
-                custom_id=f"beta_accept_{data['discord_user_id']}",
-                emoji="✅"
-            ))
-            row.add_item(Button(
-                label="Ablehnen",
-                style=discord.ButtonStyle.danger,
-                custom_id=f"beta_reject_{data['discord_user_id']}",
-                emoji="❌"
-            ))
+            row.add_item(AcceptButton())
+            row.add_item(RejectButton())
+            row.add_item(QuestionsButton())
             container.add_item(row)
         else:
-            if decided == "accepted":
-                container.add_item(TextDisplay(f"### ✅ Angenommen von {admin.mention}"))
-            else:
-                container.add_item(TextDisplay(f"### ❌ Abgelehnt von {admin.mention}"))
+            if status == "accepted":
+                container.add_item(TextDisplay(f"### ✅ Angenommen von {admin.mention if admin else 'Unbekannt'}"))
+            elif status == "rejected":
+                reason_text = f"\n**Grund:** {reason}" if reason else ""
+                container.add_item(TextDisplay(f"### ❌ Abgelehnt von {admin.mention if admin else 'Unbekannt'}{reason_text}"))
+            elif status == "questions":
+                container.add_item(TextDisplay(f"### ❓ Rückfragen gestellt von {admin.mention if admin else 'Unbekannt'}"))
 
         view.add_item(container)
         return view
 
-    async def send_application_log(self, guild, user, data):
-        """Sendet die Bewerbung in den Log-Kanal und gibt die Message-ID zurück."""
-        log_channel_id = await self.config.guild(guild).log_channel()
-        if not log_channel_id:
-            log.warning("[Beta] Kein Log-Kanal konfiguriert.")
-            return None
+    async def get_application(self, interaction: discord.Interaction):
+        """Holt Bewerbungsdaten anhand der Message-ID."""
+        msg_id = str(interaction.message.id)
+        apps = await self.config.guild(interaction.guild).applications()
+        return apps.get(msg_id)
 
-        log_channel = guild.get_channel(log_channel_id)
-        if not log_channel:
-            return None
+    async def set_application_status(self, interaction: discord.Interaction, status: str, admin: discord.Member):
+        """Aktualisiert den Status einer Bewerbung."""
+        msg_id = str(interaction.message.id)
+        async with self.config.guild(interaction.guild).applications() as apps:
+            if msg_id in apps:
+                apps[msg_id]["status"] = status
+                apps[msg_id]["decided_by"] = admin.id
 
-        view = self.build_log_view(data)
+    async def check_perm_interaction(self, interaction: discord.Interaction) -> bool:
+        """Prüft, ob der User Bewerbungen bearbeiten darf."""
+        if interaction.user.guild_permissions.manage_roles:
+            return True
 
-        try:
-            msg = await log_channel.send(view=view)
-            return msg.id
-        except discord.Forbidden:
-            log.error(f"[Beta] Keine Berechtigung für Log-Kanal {log_channel_id}.")
-        except Exception as e:
-            log.error(f"[Beta] Fehler beim Senden der Bewerbung: {e}")
-        return None
+        ping_role_id = await self.config.guild(interaction.guild).ping_role()
+        if ping_role_id:
+            role = interaction.guild.get_role(ping_role_id)
+            if role and role in interaction.user.roles:
+                return True
+
+        extra_roles = await self.config.guild(interaction.guild).extra_wl_roles()
+        for role_id in extra_roles:
+            role = interaction.guild.get_role(role_id)
+            if role and role in interaction.user.roles:
+                return True
+
+        return False
+
+    async def check_perms(self, ctx_or_interaction) -> bool:
+        user = None
+        guild = None
+
+        if isinstance(ctx_or_interaction, commands.Context):
+            user = ctx_or_interaction.author
+            guild = ctx_or_interaction.guild
+            if user.guild_permissions.manage_guild:
+                return True
+        elif isinstance(ctx_or_interaction, discord.Interaction):
+            return await self.check_perm_interaction(ctx_or_interaction)
+        else:
+            return False
+
+        ping_role_id = await self.config.guild(guild).ping_role()
+        if ping_role_id and guild.get_role(ping_role_id) in user.roles:
+            return True
+
+        extra_roles = await self.config.guild(guild).extra_wl_roles()
+        for role_id in extra_roles:
+            if guild.get_role(role_id) in user.roles:
+                return True
+
+        return False
 
     # ---------------- COMMANDS ----------------
 
-    @commands.command(name="betasetup")
+    @commands.group(name="lwhitelist", invoke_without_command=False)
     @commands.admin_or_permissions(manage_guild=True)
-    async def betasetup(self, ctx, channel: discord.TextChannel):
-        """Richtet die Beta-Bewerbung in einem Kanal ein."""
+    async def lwhitelist_group(self, ctx: commands.Context):
+        """Einstellungen für das FiveM Whitelist System."""
+        pass
+
+    @commands.command(name="lw")
+    async def manual_add_wl(self, ctx: commands.Context, user_id: int):
+        """Fügt einem User manuell die Whitelist-Rolle hinzu."""
+        if not await self.check_perms(ctx):
+            return await ctx.send("❌ Du hast keine Berechtigung.", delete_after=10)
+
+        wl_role_id = await self.config.guild(ctx.guild).wl_role()
+        if not wl_role_id:
+            return await ctx.send("❌ Es ist keine Whitelist-Rolle hinterlegt.")
+
+        wl_role = ctx.guild.get_role(wl_role_id)
+        if not wl_role:
+            return await ctx.send("❌ Die Whitelist-Rolle existiert nicht mehr.")
+
+        try:
+            member = await ctx.guild.fetch_member(user_id)
+        except discord.NotFound:
+            return await ctx.send("❌ User nicht auf diesem Server gefunden.")
+        except discord.HTTPException:
+            return await ctx.send("❌ Fehler beim Abrufen des Users.")
+
+        if wl_role in member.roles:
+            return await ctx.send("ℹ️ Dieser User hat die Whitelist bereits.")
+
+        try:
+            await member.add_roles(wl_role)
+            await ctx.send(f"✅ {member.mention} hat nun die Whitelist-Rolle {wl_role.mention}.")
+        except discord.Forbidden:
+            await ctx.send("❌ Keine Berechtigung, diese Rolle zu vergeben.")
+
+    @commands.command(name="luw")
+    async def manual_remove_wl(self, ctx: commands.Context, user_id: int):
+        """Entfernt einem User manuell die Whitelist-Rolle."""
+        if not await self.check_perms(ctx):
+            return await ctx.send("❌ Du hast keine Berechtigung.", delete_after=10)
+
+        wl_role_id = await self.config.guild(ctx.guild).wl_role()
+        if not wl_role_id:
+            return await ctx.send("❌ Es ist keine Whitelist-Rolle hinterlegt.")
+
+        wl_role = ctx.guild.get_role(wl_role_id)
+        if not wl_role:
+            return await ctx.send("❌ Die Whitelist-Rolle existiert nicht mehr.")
+
+        try:
+            member = await ctx.guild.fetch_member(user_id)
+        except discord.NotFound:
+            return await ctx.send("❌ User nicht gefunden.")
+
+        if wl_role not in member.roles:
+            return await ctx.send("ℹ️ Dieser User hat die Whitelist gar nicht.")
+
+        try:
+            await member.remove_roles(wl_role)
+            await ctx.send(f"✅ Whitelist-Rolle von {member.mention} entfernt.")
+        except discord.Forbidden:
+            await ctx.send("❌ Keine Berechtigung, diese Rolle zu entfernen.")
+
+    @commands.command(name="lwb")
+    async def manual_blacklist(self, ctx: commands.Context, user_id: int, *, reason: str):
+        """Setzt einen User auf die Blacklist."""
+        if not await self.check_perms(ctx):
+            return await ctx.send("❌ Du hast keine Berechtigung.", delete_after=10)
+
+        async with self.config.guild(ctx.guild).blacklist() as blacklist:
+            if user_id in blacklist:
+                return await ctx.send("ℹ️ User steht bereits auf der Blacklist.")
+            blacklist.append(user_id)
+
+        member = None
+        try:
+            member = await ctx.guild.fetch_member(user_id)
+            if member:
+                try:
+                    await member.send(
+                        f"🚫 **Blacklist-Mitteilung**\n\n"
+                        f"Du wurdest auf **{ctx.guild.name}** von der Whitelist-Bewerbung ausgeschlossen.\n"
+                        f"**Grund:** {reason}"
+                    )
+                except discord.Forbidden:
+                    pass
+        except discord.NotFound:
+            pass
+
+        # Blacklist-Log
+        bl_channel_id = await self.config.guild(ctx.guild).blacklist_channel()
+        if bl_channel_id:
+            bl_channel = ctx.guild.get_channel(bl_channel_id)
+            if bl_channel:
+                if V2_AVAILABLE:
+                    view = LayoutView()
+                    container = Container(accent_color=discord.Color.dark_red())
+                    container.add_item(TextDisplay("## 🚫 User geblacklistet"))
+                    container.add_item(Separator())
+                    user_display = member.mention if member else f"`{user_id}`"
+                    container.add_item(TextDisplay(f"**User:** {user_display} (`{user_id}`)"))
+                    container.add_item(TextDisplay(f"**Admin:** {ctx.author.mention}"))
+                    container.add_item(TextDisplay(f"**Grund:** {reason}"))
+                    view.add_item(container)
+                    await bl_channel.send(view=view)
+                else:
+                    embed = discord.Embed(title="🚫 User geblacklistet", color=discord.Color.dark_red())
+                    embed.add_field(name="User", value=f"`{user_id}`", inline=False)
+                    embed.add_field(name="Admin", value=ctx.author.mention, inline=False)
+                    embed.add_field(name="Grund", value=reason, inline=False)
+                    await bl_channel.send(embed=embed)
+
+        await ctx.send(f"✅ User `{user_id}` auf die Blacklist gesetzt.")
+
+    @commands.command(name="lunwb")
+    async def manual_unblacklist(self, ctx: commands.Context, user_id: int):
+        """Entfernt einen User von der Blacklist."""
+        if not await self.check_perms(ctx):
+            return await ctx.send("❌ Keine Berechtigung.", delete_after=10)
+
+        was = False
+        async with self.config.guild(ctx.guild).blacklist() as blacklist:
+            if user_id in blacklist:
+                blacklist.remove(user_id)
+                was = True
+
+        if was:
+            await ctx.send(f"✅ User `{user_id}` wurde von der Blacklist entfernt.")
+        else:
+            await ctx.send("ℹ️ User stand nicht auf der Blacklist.")
+
+    # ---------------- SETUP WIZARD ----------------
+
+    @lwhitelist_group.command(name="wizard")
+    async def setup_wizard(self, ctx: commands.Context):
+        """Startet den interaktiven Setup-Assistenten."""
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        await ctx.send("**[1/5]** Bitte mentione den Channel für die Bewerbungen (z.B. `#team-bewerbungen`).")
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=60.0)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏱️ Timeout. Abgebrochen.")
+        if not msg.channel_mentions:
+            return await ctx.send("❌ Kein Channel erwähnt.")
+        log_channel = msg.channel_mentions[0]
+        await self.config.guild(ctx.guild).log_channel.set(log_channel.id)
+
+        await ctx.send(f"✅ Log-Channel: {log_channel.mention}.\n\n**[2/5]** Mentione die Whitelist-Rolle (z.B. `@Whitelist`).")
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=60.0)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏱️ Timeout.")
+        if not msg.role_mentions:
+            return await ctx.send("❌ Keine Rolle erwähnt.")
+        wl_role = msg.role_mentions[0]
+        await self.config.guild(ctx.guild).wl_role.set(wl_role.id)
+
+        await ctx.send(f"✅ WL-Rolle: {wl_role.mention}.\n\n**[3/5]** Welche Rolle soll bei neuen Bewerbungen gepingt werden? (`skip` für keine)")
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=60.0)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏱️ Timeout.")
+        if msg.content.lower() == "skip":
+            await self.config.guild(ctx.guild).ping_role.set(None)
+            await ctx.send("✅ Keine Ping-Rolle.")
+        elif msg.role_mentions:
+            await self.config.guild(ctx.guild).ping_role.set(msg.role_mentions[0].id)
+            await ctx.send(f"✅ Ping-Rolle: {msg.role_mentions[0].mention}.")
+        else:
+            await self.config.guild(ctx.guild).ping_role.set(None)
+            await ctx.send("❌ Ungültig. Überspringe Ping-Rolle.")
+
+        await ctx.send("**[4/5]** Weitere Rollen, die Bewerbungen bearbeiten dürfen? (`skip` für keine)")
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=60.0)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏱️ Timeout.")
+        if msg.content.lower() == "skip" or not msg.role_mentions:
+            await self.config.guild(ctx.guild).extra_wl_roles.set([])
+            await ctx.send("✅ Keine Extra-Rollen.")
+        else:
+            await self.config.guild(ctx.guild).extra_wl_roles.set([r.id for r in msg.role_mentions])
+            await ctx.send(f"✅ Extra-Rollen gesetzt.")
+
+        await ctx.send("**[5/5]** Channel für Blacklist-Einträge? (`skip` für keinen)")
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=60.0)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏱️ Timeout.")
+        if msg.content.lower() == "skip" or not msg.channel_mentions:
+            await self.config.guild(ctx.guild).blacklist_channel.set(None)
+            await ctx.send("✅ Kein Blacklist-Channel.")
+        else:
+            await self.config.guild(ctx.guild).blacklist_channel.set(msg.channel_mentions[0].id)
+            await ctx.send(f"✅ Blacklist-Channel: {msg.channel_mentions[0].mention}.")
+
+        await ctx.send("🎉 **Setup abgeschlossen!** Poste das Panel mit `!lwhitelist setup`.")
+
+    @lwhitelist_group.command(name="setchannel")
+    async def set_log_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Setzt den Bewerbungs-Channel."""
+        await self.config.guild(ctx.guild).log_channel.set(channel.id)
+        await ctx.send(f"✅ Bewerbungs-Channel: {channel.mention}.")
+
+    @lwhitelist_group.command(name="setblchannel")
+    async def set_bl_channel(self, ctx: commands.Context, channel: discord.TextChannel = None):
+        """Setzt den Blacklist-Log-Channel."""
+        await self.config.guild(ctx.guild).blacklist_channel.set(channel.id if channel else None)
+        await ctx.send(f"✅ Blacklist-Channel: {channel.mention}." if channel else "✅ Entfernt.")
+
+    @lwhitelist_group.command(name="setrole")
+    async def set_wl_role(self, ctx: commands.Context, role: discord.Role):
+        """Setzt die Whitelist-Rolle."""
+        await self.config.guild(ctx.guild).wl_role.set(role.id)
+        await ctx.send(f"✅ Whitelist-Rolle: {role.mention}.")
+
+    @lwhitelist_group.command(name="setpingrole")
+    async def set_ping_role(self, ctx: commands.Context, role: discord.Role = None):
+        """Setzt die Ping-Rolle."""
+        await self.config.guild(ctx.guild).ping_role.set(role.id if role else None)
+        await ctx.send(f"✅ Ping-Rolle: {role.mention}." if role else "✅ Entfernt.")
+
+    @lwhitelist_group.command(name="addwlrole")
+    async def add_wl_role(self, ctx: commands.Context, role: discord.Role):
+        """Fügt eine Rolle hinzu, die Bewerbungen bearbeiten darf."""
+        async with self.config.guild(ctx.guild).extra_wl_roles() as extra:
+            if role.id not in extra:
+                extra.append(role.id)
+        await ctx.send(f"✅ {role.mention} kann nun Bewerbungen bearbeiten.")
+
+    @lwhitelist_group.command(name="removewlrole")
+    async def remove_wl_role(self, ctx: commands.Context, role: discord.Role):
+        """Entfernt eine Extra-Whitelister-Rolle."""
+        async with self.config.guild(ctx.guild).extra_wl_roles() as extra:
+            if role.id in extra:
+                extra.remove(role.id)
+        await ctx.send(f"✅ {role.mention} entfernt.")
+
+    @lwhitelist_group.command(name="settings")
+    async def show_settings(self, ctx: commands.Context):
+        """Zeigt die aktuellen Einstellungen an."""
+        settings = await self.config.guild(ctx.guild).all()
+
+        log_ch = ctx.guild.get_channel(settings["log_channel"]) if settings["log_channel"] else None
+        wl_r = ctx.guild.get_role(settings["wl_role"]) if settings["wl_role"] else None
+        ping_r = ctx.guild.get_role(settings["ping_role"]) if settings["ping_role"] else None
+        bl_ch = ctx.guild.get_channel(settings["blacklist_channel"]) if settings["blacklist_channel"] else None
+        extra_rs = [ctx.guild.get_role(r) for r in settings["extra_wl_roles"]]
+        extra_rs = [r for r in extra_rs if r]
+        extra_str = ", ".join([r.mention for r in extra_rs]) if extra_rs else "Keine"
+        pending = sum(1 for a in settings["applications"].values() if a.get("status") == "pending")
+
+        if V2_AVAILABLE:
+            view = LayoutView()
+            container = Container(accent_color=discord.Color.dark_blue())
+            container.add_item(TextDisplay("## ⚙️ Whitelist System Einstellungen"))
+            container.add_item(Separator())
+            container.add_item(TextDisplay(f"**Bewerbungs-Channel:** {log_ch.mention if log_ch else 'Nicht gesetzt'}"))
+            container.add_item(TextDisplay(f"**Whitelist-Rolle:** {wl_r.mention if wl_r else 'Nicht gesetzt'}"))
+            container.add_item(TextDisplay(f"**Ping-Rolle:** {ping_r.mention if ping_r else 'Nicht gesetzt'}"))
+            container.add_item(TextDisplay(f"**Extra Whitelister:** {extra_str}"))
+            container.add_item(TextDisplay(f"**Blacklist-Channel:** {bl_ch.mention if bl_ch else 'Nicht gesetzt'}"))
+            container.add_item(TextDisplay(f"**Offene Bewerbungen:** {pending}"))
+            view.add_item(container)
+            await ctx.send(view=view)
+        else:
+            embed = discord.Embed(title="⚙️ Whitelist Einstellungen", color=discord.Color.dark_blue())
+            embed.add_field(name="Bewerbungs-Channel", value=log_ch.mention if log_ch else "Nicht gesetzt", inline=False)
+            embed.add_field(name="Whitelist-Rolle", value=wl_r.mention if wl_r else "Nicht gesetzt", inline=False)
+            embed.add_field(name="Ping-Rolle", value=ping_r.mention if ping_r else "Nicht gesetzt", inline=False)
+            embed.add_field(name="Extra Whitelister", value=extra_str, inline=False)
+            embed.add_field(name="Blacklist-Channel", value=bl_ch.mention if bl_ch else "Nicht gesetzt", inline=False)
+            await ctx.send(embed=embed)
+
+    @lwhitelist_group.command(name="setup")
+    async def setup_panel(self, ctx: commands.Context):
+        """Sendet das Panel, auf das User klicken können."""
         if not V2_AVAILABLE:
             return await ctx.send("❌ Deine discord.py Version unterstützt keine Components V2.")
 
-        embed = discord.Embed(
-            title="Betabewerbung - Kreis Lindenberg",
-            description="Die Bewerbung wird initialisiert...",
-            color=discord.Color.dark_blue()
-        )
-        msg = await channel.send(embed=embed)
+        view = WhitelistButtonView(self.config)
+        await ctx.send(view=view)
 
-        await self.config.guild(ctx.guild).channel_id.set(channel.id)
-        await self.config.guild(ctx.guild).message_id.set(msg.id)
-
-        view = BetaApplicationView()
-        try:
-            await msg.edit(content=None, embed=None, view=view)
-        except Exception as e:
-            log.error(f"[Beta] Fehler beim Editieren: {e}")
-            return await ctx.send(f"❌ Fehler beim Erstellen der Nachricht: {e}")
-
-        await ctx.send(f"✅ Beta-Bewerbung wurde in {channel.mention} eingerichtet.")
-
-    @commands.command(name="betalog")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def betalog(self, ctx, channel: discord.TextChannel = None):
-        """Setzt den Log-Kanal für eingegangene Bewerbungen."""
-        if channel is None:
-            await self.config.guild(ctx.guild).log_channel.set(None)
-            return await ctx.send("✅ Bewerbungs-Log-Kanal entfernt.")
-        await self.config.guild(ctx.guild).log_channel.set(channel.id)
-        await ctx.send(f"✅ Bewerbungen werden jetzt in {channel.mention} gesendet.")
-
-    @commands.command(name="betarole")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def betarole(self, ctx, role: discord.Role = None):
-        """Setzt die Rolle, die bei Annahme der Bewerbung vergeben wird."""
-        if role is None:
-            await self.config.guild(ctx.guild).accepted_role.set(None)
-            return await ctx.send("✅ Annahme-Rolle entfernt.")
-        if role.is_default():
-            return await ctx.send("❌ `@everyone` kann nicht verwendet werden.")
-        await self.config.guild(ctx.guild).accepted_role.set(role.id)
-        await ctx.send(f"✅ Bei Annahme wird jetzt die Rolle {role.mention} vergeben.")
-
-    @commands.command(name="betaupdate")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def betaupdate(self, ctx):
-        """Erzwingt ein manuelles Update der Bewerbungsnachricht."""
-        channel_id = await self.config.guild(ctx.guild).channel_id()
-        message_id = await self.config.guild(ctx.guild).message_id()
-
-        if not channel_id or not message_id:
-            return await ctx.send("❌ Die Bewerbung wurde noch nicht eingerichtet.")
-
-        channel = ctx.guild.get_channel(channel_id)
-        if not channel:
-            return await ctx.send("❌ Der Kanal existiert nicht mehr.")
-
-        try:
-            message = await channel.fetch_message(message_id)
-        except discord.NotFound:
-            return await ctx.send("❌ Die Nachricht existiert nicht mehr. Bitte `betasetup` erneut ausführen.")
-
-        view = BetaApplicationView()
-        try:
-            await message.edit(content=None, embed=None, view=view)
-            await ctx.send("✅ Bewerbungs-Nachricht wurde aktualisiert.")
-        except Exception as e:
-            await ctx.send(f"❌ Fehler beim Aktualisieren: {e}")
-
-    @commands.command(name="betaunreject")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def betaunreject(self, ctx, member: discord.Member):
-        """Hebt die Sperre eines abgelehnten Users auf."""
-        async with self.config.guild(ctx.guild).rejected_users() as rejected:
-            if member.id in rejected:
-                rejected.remove(member.id)
-                await ctx.send(f"✅ {member.mention} kann sich wieder bewerben.")
-            else:
-                await ctx.send(f"❌ {member.mention} ist nicht gesperrt.")
-
-    @commands.command(name="betaunapply")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def betaunapply(self, ctx, member: discord.Member):
-        """Löscht eine laufende/entschiedene Bewerbung eines Users."""
-        async with self.config.guild(ctx.guild).applications() as apps:
-            if str(member.id) in apps:
-                del apps[str(member.id)]
-                await ctx.send(f"✅ Bewerbung von {member.mention} wurde gelöscht.")
-            else:
-                await ctx.send(f"❌ Keine Bewerbung von {member.mention} gefunden.")
-
-    @commands.command(name="betastats")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def betastats(self, ctx):
-        """Zeigt eine Übersicht aller Bewerbungen."""
+    @lwhitelist_group.command(name="stats")
+    async def stats(self, ctx: commands.Context):
+        """Zeigt eine Statistik über alle Bewerbungen."""
         apps = await self.config.guild(ctx.guild).applications()
-        pending_review = [uid for uid, a in apps.items() if a.get("status") == "pending_review"]
-        pending_modal2 = [uid for uid, a in apps.items() if a.get("status") == "pending_modal2"]
-        accepted = [uid for uid, a in apps.items() if a.get("status") == "accepted"]
-        rejected_apps = [uid for uid, a in apps.items() if a.get("status") == "rejected"]
-        rejected_list = await self.config.guild(ctx.guild).rejected_users()
+        pending = sum(1 for a in apps.values() if a.get("status") == "pending")
+        accepted = sum(1 for a in apps.values() if a.get("status") == "accepted")
+        rejected = sum(1 for a in apps.values() if a.get("status") == "rejected")
+        questions = sum(1 for a in apps.values() if a.get("status") == "questions")
+        blacklist = len(await self.config.guild(ctx.guild).blacklist())
 
-        embed = discord.Embed(title="📊 Beta-Bewerbungen — Statistik", color=discord.Color.dark_blue())
-        embed.add_field(name="⏳ In Prüfung", value=f"**{len(pending_review)}**", inline=True)
-        embed.add_field(name="✍️ Teil 2 offen", value=f"**{len(pending_modal2)}**", inline=True)
-        embed.add_field(name="✅ Angenommen", value=f"**{len(accepted)}**", inline=True)
-        embed.add_field(name="❌ Abgelehnt (Bewerbung)", value=f"**{len(rejected_apps)}**", inline=True)
-        embed.add_field(name="🚫 Gesperrte User", value=f"**{len(rejected_list)}**", inline=True)
-        await ctx.send(embed=embed)
-
-    @commands.command(name="betahelp")
-    async def betahelp(self, ctx):
-        """Zeigt die Befehle für das Beta-Bewerbungssystem an."""
-        embed = discord.Embed(title="📝 Beta-Bewerbung — Befehlsübersicht", color=discord.Color.dark_blue())
-        embed.add_field(
-            name="⚙️ Setup",
-            value=(
-                "`betasetup #kanal` — Bewerbung einrichten\n"
-                "`betalog #kanal` — Log-Kanal für Bewerbungen setzen\n"
-                "`betarole @rolle` — Rolle bei Annahme setzen\n"
-                "`betaupdate` — Nachricht manuell aktualisieren"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="🛠️ Verwaltung",
-            value=(
-                "`betaunreject @user` — Sperre eines Users aufheben\n"
-                "`betaunapply @user` — Bewerbung eines Users löschen\n"
-                "`betastats` — Übersicht aller Bewerbungen"
-            ),
-            inline=False,
-        )
-        embed.set_footer(text="User können sich über den Button in der Nachricht bewerben.")
-        await ctx.send(embed=embed)
+        if V2_AVAILABLE:
+            view = LayoutView()
+            container = Container(accent_color=discord.Color.dark_blue())
+            container.add_item(TextDisplay("## 📊 Whitelist-Statistik"))
+            container.add_item(Separator())
+            container.add_item(TextDisplay(f"⏳ **Offen:** {pending}"))
+            container.add_item(TextDisplay(f"✅ **Angenommen:** {accepted}"))
+            container.add_item(TextDisplay(f"❌ **Abgelehnt:** {rejected}"))
+            container.add_item(TextDisplay(f"❓ **Rückfragen:** {questions}"))
+            container.add_item(TextDisplay(f"🚫 **Blacklist:** {blacklist}"))
+            view.add_item(container)
+            await ctx.send(view=view)
+        else:
+            embed = discord.Embed(title="📊 Whitelist-Statistik", color=discord.Color.dark_blue())
+            embed.add_field(name="Offen", value=pending)
+            embed.add_field(name="Angenommen", value=accepted)
+            embed.add_field(name="Abgelehnt", value=rejected)
+            embed.add_field(name="Rückfragen", value=questions)
+            embed.add_field(name="Blacklist", value=blacklist)
+            await ctx.send(embed=embed)
 
 
-async def setup(bot):
-    await bot.add_cog(Beta(bot))
+async def setup(bot: Red):
+    await bot.add_cog(FiveMWhitelist(bot))
